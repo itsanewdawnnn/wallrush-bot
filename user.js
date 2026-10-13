@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '3.2';
+  const VERSION = '3.3';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -8,6 +8,7 @@
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 4000;
   const GAME_CAP = 5000;
+  const RECORD_CAP = 300;
   const $ = (id) => document.getElementById(id);
   let enabled = false;
   let busy = false;
@@ -25,11 +26,19 @@
     for (let i = 0; i < losses; i++) old.push(['lama-k' + i, 0]);
     return old;
   };
+  const isInts = (list, size) => Array.isArray(list) && list.every(Number.isInteger)
+    && (size === undefined || list.length === size);
+  const toRecords = (data) => {
+    if (!Array.isArray(data.records)) return [];
+    return data.records.filter((r) => Array.isArray(r) && r.length === 5 && typeof r[0] === 'string'
+      && (r[1] === 0 || r[1] === 1) && (r[2] === 0 || r[2] === 1) && isInts(r[3])
+      && Array.isArray(r[4]) && r[4].every((p) => isInts(p, 8)));
+  };
   const normalize = (data) => {
     if (!data || !Array.isArray(data.lost) || !Array.isArray(data.won)) return null;
-    return { games: toGames(data), lost: toInts(data.lost), won: toInts(data.won) };
+    return { games: toGames(data), lost: toInts(data.lost), won: toInts(data.won), records: toRecords(data) };
   };
-  const emptyMemory = () => ({ games: [], lost: [], won: [] });
+  const emptyMemory = () => ({ games: [], lost: [], won: [], records: [] });
   const loadMemory = () => {
     try {
       return normalize(JSON.parse(localStorage.getItem(STORE_KEY))) || emptyMemory();
@@ -64,9 +73,14 @@
   const merged = () => {
     const sources = remote ? [remote, memory] : [memory];
     const games = new Map();
-    for (const s of sources) for (const [id, result] of s.games) games.set(id, result);
+    const records = new Map();
+    for (const s of sources) {
+      for (const [id, result] of s.games) games.set(id, result);
+      for (const r of s.records) records.set(r[0], r);
+    }
     return {
       games: [...games],
+      records: [...records.values()],
       lost: [...new Set(sources.flatMap((s) => s.lost))],
       won: [...new Set(sources.flatMap((s) => s.won))],
     };
@@ -634,6 +648,8 @@
     }
   };
 
+  const newSession = (state) => ({ keys: [], walls: state.walls.length, positions: [], last: '' });
+
   const settle = (ctx) => {
     if (!session) return;
     const { state } = ctx;
@@ -642,19 +658,40 @@
     if (state.turn !== null) return;
     const goalRow = (p) => (state.mode === 'race' || p === 0 ? 0 : ctx.rows - 1);
     const winner = [0, 1].find((p) => state.pawns[p].r === goalRow(p));
-    if (winner !== undefined) {
+    if (winner !== undefined && session.keys.length) {
       const won = winner === ctx.me;
+      const id = newId();
+      const wallInts = state.walls.map((w) => w.r * 100 + w.c * 10 + (w.o === 'v' ? 1 : 0));
       remember(won ? 'won' : 'lost', session.keys);
-      memory.games = [...memory.games, [newId(), won ? 1 : 0]].slice(-GAME_CAP);
+      memory.games = [...memory.games, [id, won ? 1 : 0]].slice(-GAME_CAP);
+      memory.records = [...memory.records,
+        [id, state.mode === 'race' ? 1 : 0, winner, wallInts, session.positions]].slice(-RECORD_CAP);
       saveMemory();
       paint();
     }
     session = null;
   };
 
+  const observe = (ctx) => {
+    const { state } = ctx;
+    if (state.turn === null) return;
+    if (!session) {
+      if (!enabled) return;
+      session = newSession(state);
+    }
+    const [a, b] = state.pawns;
+    const signature = [state.turn, a.r, a.c, b.r, b.c, state.walls.length].join(',');
+    if (signature === session.last) return;
+    session.last = signature;
+    session.positions.push([state.turn, a.r, a.c, b.r, b.c, state.left[0], state.left[1], state.walls.length]);
+  };
+
   const step = async () => {
     const ctx = readState();
-    if (ctx) settle(ctx);
+    if (ctx) {
+      settle(ctx);
+      observe(ctx);
+    }
     if (!enabled || busy) return;
     if (!ctx || ctx.state.turn !== ctx.me) return;
     busy = true;
@@ -663,7 +700,7 @@
       const now = readState();
       if (enabled && move && now && now.state.turn === now.me) {
         play(now, move);
-        if (!session) session = { keys: [], walls: now.state.walls.length };
+        if (!session) session = newSession(now.state);
         session.keys.push(move.key);
       }
     } finally {
@@ -684,7 +721,8 @@
       + (played ? ` · ${wins}M ${losses}K` : '') + ' · ' + memoryLabel();
     button.style.background = enabled ? '#16a34a' : '#6b7280';
     button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
-      + ' permainan, ' + avoidList().length + ' posisi kalah diingat. '
+      + ' permainan, ' + avoidList().length + ' posisi kalah diingat, '
+      + merged().records.length + ' rekaman posisi untuk pelatihan. '
       + (readUrl() ? 'Sumber memori: ' + readUrl() : 'Alamat GitHub belum diatur (tombol ☁).');
   };
   const toggle = () => {
@@ -716,6 +754,8 @@
     const incoming = normalize(data);
     if (!incoming) return false;
     memory.games = [...new Map([...memory.games, ...incoming.games])].slice(-GAME_CAP);
+    memory.records = [...new Map([...memory.records, ...incoming.records].map((r) => [r[0], r])).values()]
+      .slice(-RECORD_CAP);
     remember('lost', incoming.lost);
     remember('won', incoming.won);
     saveMemory();
