@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '3.6';
+  const VERSION = '3.7';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -760,6 +760,7 @@
 
   const step = async () => {
     rematchStep();
+    layout();
     paintAuto();
     const ctx = readState();
     if (ctx) {
@@ -782,8 +783,13 @@
     }
   };
 
+  const BOX_STYLE = 'position:fixed;left:8px;bottom:8px;z-index:99999;display:flex;flex-wrap:wrap;gap:4px;'
+    + 'max-width:calc(100vw - 16px)';
+  const BOX_COMPACT_STYLE = 'position:fixed;right:8px;bottom:8px;z-index:99999;display:flex;'
+    + 'flex-direction:column;align-items:flex-end;gap:4px';
+  let compact = false;
   const box = document.createElement('div');
-  box.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;display:flex;gap:4px';
+  box.style.cssText = BOX_STYLE;
   const buttonStyle = 'padding:6px 10px;border:0;border-radius:8px;font:600 13px system-ui,sans-serif;'
     + 'color:#fff;opacity:.85;cursor:pointer;background:#6b7280';
   const button = document.createElement('button');
@@ -792,7 +798,7 @@
     const { wins, losses } = record();
     const played = wins + losses;
     button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'NYALA' : 'MATI')
-      + (played ? ` · ${wins}M ${losses}K` : '') + ' · ' + memoryLabel();
+      + (played ? ` · ${wins}M ${losses}K` : '') + (compact ? '' : ' · ' + memoryLabel());
     button.style.background = enabled ? '#16a34a' : '#6b7280';
     button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
       + ' permainan, ' + avoidList().length + ' posisi kalah diingat, '
@@ -894,7 +900,7 @@
     if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
     if (cycle.phase === 'rematch') {
       const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
-      return '↻ Ulang: menunggu lawan ' + left + ' dtk';
+      return '↻ Ulang: tunggu ' + left + ' dtk';
     }
     return '↻ Ulang: Quick match...';
   };
@@ -909,6 +915,18 @@
     paintAuto();
   };
   autoButton.addEventListener('click', toggleAuto);
+  const layout = () => {
+    const inGame = document.documentElement.classList.contains('in-game');
+    if (inGame === compact) return;
+    compact = inGame;
+    box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
+    for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
+    for (const b of [button, autoButton]) {
+      b.style.fontSize = compact ? '12px' : '13px';
+      b.style.padding = compact ? '5px 8px' : '6px 10px';
+    }
+    paint();
+  };
   document.addEventListener('keydown', (e) => {
     if (!e.altKey) return;
     const key = e.key.toLowerCase();
@@ -918,7 +936,7 @@
   paint();
   paintAuto();
   box.append(button, autoButton, exportButton, importButton, urlButton, reset, picker);
-  document.body.appendChild(box);
+  ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
 })();
