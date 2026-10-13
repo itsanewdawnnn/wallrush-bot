@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '3.3';
+  const VERSION = '3.4';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -30,7 +30,8 @@
     && (size === undefined || list.length === size);
   const toRecords = (data) => {
     if (!Array.isArray(data.records)) return [];
-    return data.records.filter((r) => Array.isArray(r) && r.length === 5 && typeof r[0] === 'string'
+    return data.records.filter((r) => Array.isArray(r) && (r.length === 5 || (r.length === 6 && (r[5] === 0 || r[5] === 1)))
+      && typeof r[0] === 'string'
       && (r[1] === 0 || r[1] === 1) && (r[2] === 0 || r[2] === 1) && isInts(r[3])
       && Array.isArray(r[4]) && r[4].every((p) => isInts(p, 8)));
   };
@@ -650,22 +651,40 @@
 
   const newSession = (state) => ({ keys: [], walls: state.walls.length, positions: [], last: '' });
 
+  const outcome = (ctx) => {
+    const { state } = ctx;
+    const goalRow = (p) => (state.mode === 'race' || p === 0 ? 0 : ctx.rows - 1);
+    const reached = [0, 1].find((p) => state.pawns[p].r === goalRow(p));
+    if (reached !== undefined) return { winner: reached, ending: 0 };
+    const overlay = $('overlay-gameover');
+    const tag = $('rs-tag-me');
+    if (overlay && !overlay.hidden && tag && (tag.className === 'win' || tag.className === 'loss')) {
+      return { winner: tag.className === 'win' ? ctx.me : 1 - ctx.me, ending: 1 };
+    }
+    return null;
+  };
+
   const settle = (ctx) => {
     if (!session) return;
     const { state } = ctx;
     if (state.walls.length < session.walls) { session = null; return; }
     session.walls = state.walls.length;
     if (state.turn !== null) return;
-    const goalRow = (p) => (state.mode === 'race' || p === 0 ? 0 : ctx.rows - 1);
-    const winner = [0, 1].find((p) => state.pawns[p].r === goalRow(p));
-    if (winner !== undefined && session.keys.length) {
-      const won = winner === ctx.me;
+    const result = outcome(ctx);
+    if (!result) {
+      session.waiting = (session.waiting || 0) + 1;
+      if (session.waiting > 12) session = null;
+      return;
+    }
+    if (session.keys.length) {
+      const won = result.winner === ctx.me;
       const id = newId();
       const wallInts = state.walls.map((w) => w.r * 100 + w.c * 10 + (w.o === 'v' ? 1 : 0));
       remember(won ? 'won' : 'lost', session.keys);
       memory.games = [...memory.games, [id, won ? 1 : 0]].slice(-GAME_CAP);
       memory.records = [...memory.records,
-        [id, state.mode === 'race' ? 1 : 0, winner, wallInts, session.positions]].slice(-RECORD_CAP);
+        [id, state.mode === 'race' ? 1 : 0, result.winner, wallInts, session.positions, result.ending]]
+        .slice(-RECORD_CAP);
       saveMemory();
       paint();
     }
