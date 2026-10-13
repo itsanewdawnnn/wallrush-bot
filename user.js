@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '3.5';
+  const VERSION = '3.6';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -746,7 +746,7 @@
     }
     if (cycle.phase === 'rematch') {
       if (!over) cycle = null;
-      else if (now - cycle.since >= RESTART_TIMEOUT_MS) toMenu();
+      else if (!shown($('btn-rematch')) || now - cycle.since >= RESTART_TIMEOUT_MS) toMenu();
       return;
     }
     const quick = $('btn-quick');
@@ -760,6 +760,7 @@
 
   const step = async () => {
     rematchStep();
+    paintAuto();
     const ctx = readState();
     if (ctx) {
       settle(ctx);
@@ -887,8 +888,19 @@
   autoButton.style.cssText = buttonStyle;
   autoButton.title = 'Rematch otomatis saat permainan berakhir. Bila 15 detik permainan tidak dimulai, '
     + 'kembali ke menu lalu Quick match (Alt+R)';
+  const autoLabel = () => {
+    if (!autoRematch) return '↻ Ulang: MATI';
+    if (!cycle) return '↻ Ulang: NYALA';
+    if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
+    if (cycle.phase === 'rematch') {
+      const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
+      return '↻ Ulang: menunggu lawan ' + left + ' dtk';
+    }
+    return '↻ Ulang: Quick match...';
+  };
   const paintAuto = () => {
-    autoButton.textContent = '↻ Ulang: ' + (autoRematch ? 'NYALA' : 'MATI');
+    const text = autoLabel();
+    if (autoButton.textContent !== text) autoButton.textContent = text;
     autoButton.style.background = autoRematch ? '#2563eb' : '#6b7280';
   };
   const toggleAuto = () => {
