@@ -2,9 +2,38 @@
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
+  const STORE_KEY = 'wallrushBot.memory.v1';
+  const MEMORY_CAP = 4000;
   const $ = (id) => document.getElementById(id);
   let enabled = false;
   let busy = false;
+  let session = null;
+
+  const emptyMemory = () => ({ lost: [], won: [], wins: 0, losses: 0 });
+  const loadMemory = () => {
+    try {
+      const m = JSON.parse(localStorage.getItem(STORE_KEY));
+      if (m && Array.isArray(m.lost) && Array.isArray(m.won)) return { ...emptyMemory(), ...m };
+    } catch (e) {
+      return emptyMemory();
+    }
+    return emptyMemory();
+  };
+  let memory = loadMemory();
+  const saveMemory = () => {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(memory));
+    } catch (e) {
+      return;
+    }
+  };
+  const remember = (list, keys) => {
+    memory[list] = [...new Set([...memory[list], ...keys])].slice(-MEMORY_CAP);
+  };
+  const avoidList = () => {
+    const won = new Set(memory.won);
+    return memory.lost.filter((k) => !won.has(k));
+  };
 
   function engineMain() {
     const MATE = 1000000;
@@ -15,10 +44,10 @@
     const ttDepth = new Int8Array(TT_SIZE);
     const ttFlag = new Int8Array(TT_SIZE);
 
-    const STEP = 100;
-    const TEMPO = 30;
-    const WALL_VALUE = 25;
     const NEAR_WIN = 5000;
+    const DEFAULT_WEIGHTS = [58.2, 27.9, 93.6, -5.5, -5, 5.8, -7.5, 231.8, -153.2];
+    const EW = DEFAULT_WEIGHTS;
+    let avoid = null;
 
     let seed = 0x5eed1234;
     const rand = () => {
@@ -167,8 +196,16 @@
       return out;
     };
 
+    const evalFn = (dM, dO, lM, lO) => {
+      const diff = dO - dM;
+      return EW[0] * diff + EW[1] + EW[2] * (lM - lO)
+        + EW[3] * diff * lO / 10 + EW[4] * diff * lM / 10
+        + EW[5] * lM * Math.min(dO, 8) / 8 + EW[6] * lO * Math.min(dM, 8) / 8
+        + EW[7] * Math.max(0, 4 - dM) + EW[8] * Math.max(0, 4 - dO);
+    };
+
     const stat = (dMeAfter, dOppAfter, leftMe, leftOpp) => {
-      let s = (dMeAfter - dOppAfter) * STEP + TEMPO + (leftOpp - leftMe) * WALL_VALUE;
+      let s = evalFn(dOppAfter, dMeAfter, leftOpp, leftMe);
       if (dOppAfter <= 1) s += NEAR_WIN;
       return -s;
     };
@@ -228,14 +265,17 @@
       if (pm.length) list.push(pm[0]);
       for (const w of wm) list.push(w);
       for (let k = 1; k < pm.length; k++) list.push(pm[k]);
-      if (ply === 0 && seen.size) {
-        const fresh = list.filter((m) => {
-          if (m.win) return true;
+      if (ply === 0 && (seen.size || avoid)) {
+        const marks = list.map((m) => {
+          if (m.win) return { again: false, bad: false };
           make(m);
-          const again = seen.has(k1);
+          const mark = { again: seen.has(k1), bad: Boolean(avoid && avoid.has(k1)) };
           unmake(m);
-          return !again;
+          return mark;
         });
+        const clean = list.filter((m, j) => !marks[j].again && !marks[j].bad);
+        if (clean.length) return clean;
+        const fresh = list.filter((m, j) => !marks[j].again);
         if (fresh.length) return fresh;
       }
       return list;
@@ -362,6 +402,7 @@
     const chooseMove = (state, opts = {}) => {
       if (state.walls.length < prevWalls || opts.newGame) seen.clear();
       prevWalls = state.walls.length;
+      avoid = opts.avoid ? new Set(opts.avoid) : null;
       load(state);
       seen.add(k1);
       ttChk.fill(0); ttDepth.fill(0);
@@ -387,17 +428,18 @@
       if (!best) return null;
       make(best);
       seen.add(k1);
+      const key = k1;
       unmake(best);
-      if (best.t === 0) return { type: 'pawn', r: rowOf[best.i], c: best.i % W };
+      if (best.t === 0) return { type: 'pawn', r: rowOf[best.i], c: best.i % W, key };
       const r = (best.i / (W - 1)) | 0, c = best.i % (W - 1);
-      return { type: 'wall', o: best.o === 0 ? 'h' : 'v', r, c };
+      return { type: 'wall', o: best.o === 0 ? 'h' : 'v', r, c, key };
     };
 
     return { chooseMove };
   }
 
   const WORKER_SRC = 'const engine=(' + engineMain.toString() + ')();'
-    + 'onmessage=(e)=>{postMessage(engine.chooseMove(e.data.state,{budgetMs:e.data.budgetMs}));};';
+    + 'onmessage=(e)=>{postMessage(engine.chooseMove(e.data.state,{budgetMs:e.data.budgetMs,avoid:e.data.avoid}));};';
   let worker = null;
   let mainEngine = null;
 
@@ -407,7 +449,7 @@
     }
     worker.onmessage = (e) => resolve(e.data);
     worker.onerror = (e) => { worker = null; reject(e); };
-    worker.postMessage({ state, budgetMs: BUDGET_MS });
+    worker.postMessage({ state, budgetMs: BUDGET_MS, avoid: avoidList() });
   });
 
   const think = async (state) => {
@@ -415,7 +457,7 @@
       return await viaWorker(state);
     } catch {
       if (!mainEngine) mainEngine = engineMain();
-      return mainEngine.chooseMove(state, { budgetMs: BUDGET_MS });
+      return mainEngine.chooseMove(state, { budgetMs: BUDGET_MS, avoid: avoidList() });
     }
   };
 
@@ -466,7 +508,6 @@
     let turn = null;
     if (chipMe.classList.contains('turn-active')) turn = me;
     else if (chipOpp && chipOpp.classList.contains('turn-active')) turn = 1 - me;
-    if (turn === null) return null;
 
     const left = [];
     left[me] = +$('me-walls').textContent;
@@ -515,34 +556,73 @@
     }
   };
 
+  const settle = (ctx) => {
+    if (!session) return;
+    const { state } = ctx;
+    if (state.walls.length < session.walls) { session = null; return; }
+    session.walls = state.walls.length;
+    if (state.turn !== null) return;
+    const goalRow = (p) => (state.mode === 'race' || p === 0 ? 0 : ctx.rows - 1);
+    const winner = [0, 1].find((p) => state.pawns[p].r === goalRow(p));
+    if (winner !== undefined) {
+      const won = winner === ctx.me;
+      remember(won ? 'won' : 'lost', session.keys);
+      memory[won ? 'wins' : 'losses']++;
+      saveMemory();
+      paint();
+    }
+    session = null;
+  };
+
   const step = async () => {
-    if (!enabled || busy) return;
     const ctx = readState();
+    if (ctx) settle(ctx);
+    if (!enabled || busy) return;
     if (!ctx || ctx.state.turn !== ctx.me) return;
     busy = true;
     try {
       const move = await think(ctx.state);
       const now = readState();
-      if (enabled && move && now && now.state.turn === now.me) play(now, move);
+      if (enabled && move && now && now.state.turn === now.me) {
+        play(now, move);
+        if (!session) session = { keys: [], walls: now.state.walls.length };
+        session.keys.push(move.key);
+      }
     } finally {
       setTimeout(() => { busy = false; }, COOLDOWN_MS);
     }
   };
 
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;display:flex;gap:4px';
+  const buttonStyle = 'padding:6px 10px;border:0;border-radius:8px;font:600 13px system-ui,sans-serif;'
+    + 'color:#fff;opacity:.85;cursor:pointer;background:#6b7280';
   const button = document.createElement('button');
-  button.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;padding:6px 10px;border:0;border-radius:8px;'
-    + 'font:600 13px system-ui,sans-serif;color:#fff;opacity:.85;cursor:pointer';
+  button.style.cssText = buttonStyle;
   const paint = () => {
-    button.textContent = 'Bot: ' + (enabled ? 'NYALA' : 'MATI');
+    const played = memory.wins + memory.losses;
+    button.textContent = 'Bot: ' + (enabled ? 'NYALA' : 'MATI') + (played ? ` · ${memory.wins}M ${memory.losses}K` : '');
     button.style.background = enabled ? '#16a34a' : '#6b7280';
+    button.title = 'Nyalakan atau matikan bot (Alt+B). Pengalaman: ' + played + ' permainan, '
+      + avoidList().length + ' posisi kalah diingat';
   };
   const toggle = () => { enabled = !enabled; paint(); };
-  button.title = 'Nyalakan atau matikan bot (Alt+B)';
   button.addEventListener('click', toggle);
+  const reset = document.createElement('button');
+  reset.style.cssText = buttonStyle;
+  reset.textContent = '↺';
+  reset.title = 'Hapus pengalaman bot';
+  reset.addEventListener('click', () => {
+    memory = emptyMemory();
+    session = null;
+    saveMemory();
+    paint();
+  });
   document.addEventListener('keydown', (e) => {
     if (e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggle(); }
   });
   paint();
-  document.body.appendChild(button);
+  box.append(button, reset);
+  document.body.appendChild(box);
   setInterval(step, POLL_MS);
 })();
