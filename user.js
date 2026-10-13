@@ -1,23 +1,41 @@
 (() => {
+  const VERSION = '3.2';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
   const STORE_KEY = 'wallrushBot.memory.v1';
+  const URL_KEY = 'wallrushBot.memoryUrl';
+  const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 4000;
+  const GAME_CAP = 5000;
   const $ = (id) => document.getElementById(id);
   let enabled = false;
   let busy = false;
   let session = null;
 
-  const emptyMemory = () => ({ lost: [], won: [], wins: 0, losses: 0 });
+  const toInts = (list) => (Array.isArray(list) ? list.filter((k) => Number.isInteger(k)) : []);
+  const toGames = (data) => {
+    if (Array.isArray(data.games)) {
+      return data.games.filter((g) => Array.isArray(g) && typeof g[0] === 'string' && (g[1] === 0 || g[1] === 1));
+    }
+    const wins = Math.min(Math.floor(Number(data.wins)) || 0, GAME_CAP);
+    const losses = Math.min(Math.floor(Number(data.losses)) || 0, GAME_CAP);
+    const old = [];
+    for (let i = 0; i < wins; i++) old.push(['lama-m' + i, 1]);
+    for (let i = 0; i < losses; i++) old.push(['lama-k' + i, 0]);
+    return old;
+  };
+  const normalize = (data) => {
+    if (!data || !Array.isArray(data.lost) || !Array.isArray(data.won)) return null;
+    return { games: toGames(data), lost: toInts(data.lost), won: toInts(data.won) };
+  };
+  const emptyMemory = () => ({ games: [], lost: [], won: [] });
   const loadMemory = () => {
     try {
-      const m = JSON.parse(localStorage.getItem(STORE_KEY));
-      if (m && Array.isArray(m.lost) && Array.isArray(m.won)) return { ...emptyMemory(), ...m };
+      return normalize(JSON.parse(localStorage.getItem(STORE_KEY))) || emptyMemory();
     } catch (e) {
       return emptyMemory();
     }
-    return emptyMemory();
   };
   let memory = loadMemory();
   const saveMemory = () => {
@@ -30,9 +48,69 @@
   const remember = (list, keys) => {
     memory[list] = [...new Set([...memory[list], ...keys])].slice(-MEMORY_CAP);
   };
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const readUrl = () => {
+    try {
+      return localStorage.getItem(URL_KEY) || '';
+    } catch (e) {
+      return '';
+    }
+  };
+
+  let remote = null;
+  let remoteVersion = '';
+  let remoteState = readUrl() ? 'memuat' : 'lokal';
+
+  const merged = () => {
+    const sources = remote ? [remote, memory] : [memory];
+    const games = new Map();
+    for (const s of sources) for (const [id, result] of s.games) games.set(id, result);
+    return {
+      games: [...games],
+      lost: [...new Set(sources.flatMap((s) => s.lost))],
+      won: [...new Set(sources.flatMap((s) => s.won))],
+    };
+  };
+  const record = () => {
+    const { games } = merged();
+    const wins = games.reduce((n, g) => n + g[1], 0);
+    return { wins, losses: games.length - wins };
+  };
   const avoidList = () => {
-    const won = new Set(memory.won);
-    return memory.lost.filter((k) => !won.has(k));
+    const all = merged();
+    const won = new Set(all.won);
+    return all.lost.filter((k) => !won.has(k));
+  };
+  const memoryLabel = () => {
+    if (remoteState === 'lokal') return 'memori lokal';
+    if (remoteState === 'memuat') return 'memori memuat';
+    if (remoteState === 'gagal') return 'memori GitHub gagal';
+    const known = new Set(remote.games.map((g) => g[0]));
+    const fresh = memory.games.filter((g) => !known.has(g[0])).length;
+    return 'memori ' + remoteVersion + (fresh ? ' +' + fresh : '');
+  };
+  const loadRemote = async () => {
+    const url = readUrl();
+    if (!url) {
+      remote = null;
+      remoteState = 'lokal';
+      paint();
+      return;
+    }
+    try {
+      const res = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      const incoming = normalize(data);
+      if (!incoming) throw new Error('bentuk');
+      remote = incoming;
+      remoteVersion = String(data.versi || '?');
+      remoteState = 'ok';
+    } catch (e) {
+      remote = null;
+      remoteState = 'gagal';
+    }
+    paint();
   };
 
   function engineMain() {
@@ -567,7 +645,7 @@
     if (winner !== undefined) {
       const won = winner === ctx.me;
       remember(won ? 'won' : 'lost', session.keys);
-      memory[won ? 'wins' : 'losses']++;
+      memory.games = [...memory.games, [newId(), won ? 1 : 0]].slice(-GAME_CAP);
       saveMemory();
       paint();
     }
@@ -600,29 +678,104 @@
   const button = document.createElement('button');
   button.style.cssText = buttonStyle;
   const paint = () => {
-    const played = memory.wins + memory.losses;
-    button.textContent = 'Bot: ' + (enabled ? 'NYALA' : 'MATI') + (played ? ` · ${memory.wins}M ${memory.losses}K` : '');
+    const { wins, losses } = record();
+    const played = wins + losses;
+    button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'NYALA' : 'MATI')
+      + (played ? ` · ${wins}M ${losses}K` : '') + ' · ' + memoryLabel();
     button.style.background = enabled ? '#16a34a' : '#6b7280';
-    button.title = 'Nyalakan atau matikan bot (Alt+B). Pengalaman: ' + played + ' permainan, '
-      + avoidList().length + ' posisi kalah diingat';
+    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
+      + ' permainan, ' + avoidList().length + ' posisi kalah diingat. '
+      + (readUrl() ? 'Sumber memori: ' + readUrl() : 'Alamat GitHub belum diatur (tombol ☁).');
   };
-  const toggle = () => { enabled = !enabled; paint(); };
+  const toggle = () => {
+    enabled = !enabled;
+    if (enabled) loadRemote();
+    paint();
+  };
   button.addEventListener('click', toggle);
   const reset = document.createElement('button');
   reset.style.cssText = buttonStyle;
   reset.textContent = '↺';
-  reset.title = 'Hapus pengalaman bot';
+  reset.title = 'Hapus pengalaman lokal bot (memori GitHub tidak ikut terhapus)';
   reset.addEventListener('click', () => {
     memory = emptyMemory();
     session = null;
     saveMemory();
     paint();
   });
+  const exportMemory = () => {
+    const versi = new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([JSON.stringify({ versi, ...merged() })], { type: 'application/json' }));
+    link.download = 'wallrush-bot-memori.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    alert('Memori diekspor. Versi: ' + versi);
+  };
+  const mergeMemory = (data) => {
+    const incoming = normalize(data);
+    if (!incoming) return false;
+    memory.games = [...new Map([...memory.games, ...incoming.games])].slice(-GAME_CAP);
+    remember('lost', incoming.lost);
+    remember('won', incoming.won);
+    saveMemory();
+    paint();
+    return true;
+  };
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.accept = 'application/json,.json';
+  picker.style.display = 'none';
+  picker.addEventListener('change', async () => {
+    const file = picker.files[0];
+    picker.value = '';
+    if (!file) return;
+    let ok = false;
+    try {
+      ok = mergeMemory(JSON.parse(await file.text()));
+    } catch (e) {
+      ok = false;
+    }
+    alert(ok ? 'Pengalaman bot berhasil digabungkan.' : 'Berkas tidak valid.');
+  });
+  const exportButton = document.createElement('button');
+  exportButton.style.cssText = buttonStyle;
+  exportButton.textContent = '⇩';
+  exportButton.title = 'Ekspor pengalaman bot ke berkas JSON';
+  exportButton.addEventListener('click', exportMemory);
+  const importButton = document.createElement('button');
+  importButton.style.cssText = buttonStyle;
+  importButton.textContent = '⇧';
+  importButton.title = 'Impor pengalaman bot dari berkas JSON';
+  importButton.addEventListener('click', () => picker.click());
+  const urlButton = document.createElement('button');
+  urlButton.style.cssText = buttonStyle;
+  urlButton.textContent = '☁';
+  urlButton.title = 'Atur alamat raw GitHub untuk memori bot';
+  urlButton.addEventListener('click', () => {
+    const input = prompt('Alamat raw GitHub berkas memori (kosongkan untuk menonaktifkan):', readUrl());
+    if (input === null) return;
+    const value = input.trim();
+    if (value && !value.startsWith(URL_PREFIX)) {
+      alert('Alamat harus diawali ' + URL_PREFIX);
+      return;
+    }
+    try {
+      localStorage.setItem(URL_KEY, value);
+    } catch (e) {
+      return;
+    }
+    remote = null;
+    remoteState = value ? 'memuat' : 'lokal';
+    paint();
+    loadRemote();
+  });
   document.addEventListener('keydown', (e) => {
     if (e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggle(); }
   });
   paint();
-  box.append(button, reset);
+  box.append(button, exportButton, importButton, urlButton, reset, picker);
   document.body.appendChild(box);
   setInterval(step, POLL_MS);
+  loadRemote();
 })();
