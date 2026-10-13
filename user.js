@@ -1,8 +1,11 @@
 (() => {
-  const VERSION = '3.4';
+  const VERSION = '3.5';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
+  const REMATCH_DELAY_MS = 2000;
+  const RESTART_TIMEOUT_MS = 15000;
+  const MENU_TIMEOUT_MS = 10000;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
@@ -13,6 +16,8 @@
   let enabled = false;
   let busy = false;
   let session = null;
+  let autoRematch = false;
+  let cycle = null;
 
   const toInts = (list) => (Array.isArray(list) ? list.filter((k) => Number.isInteger(k)) : []);
   const toGames = (data) => {
@@ -705,7 +710,56 @@
     session.positions.push([state.turn, a.r, a.c, b.r, b.c, state.left[0], state.left[1], state.walls.length]);
   };
 
+  const shown = (el) => Boolean(el && !el.hidden && el.offsetParent !== null);
+
+  const toMenu = () => {
+    $('btn-to-menu').click();
+    cycle = { phase: 'menu', since: Date.now() };
+  };
+
+  const rematchStep = () => {
+    if (!autoRematch) {
+      cycle = null;
+      return;
+    }
+    const overlay = $('overlay-gameover');
+    const over = Boolean(overlay && !overlay.hidden);
+    const now = Date.now();
+    if (!cycle) {
+      const quad = $('quad-result');
+      if (over && !(quad && !quad.hidden)) cycle = { phase: 'wait', since: now };
+      return;
+    }
+    if (cycle.phase === 'wait') {
+      if (!over) {
+        cycle = null;
+      } else if (now - cycle.since >= REMATCH_DELAY_MS) {
+        const rematch = $('btn-rematch');
+        if (shown(rematch)) {
+          rematch.click();
+          cycle = { phase: 'rematch', since: now };
+        } else {
+          toMenu();
+        }
+      }
+      return;
+    }
+    if (cycle.phase === 'rematch') {
+      if (!over) cycle = null;
+      else if (now - cycle.since >= RESTART_TIMEOUT_MS) toMenu();
+      return;
+    }
+    const quick = $('btn-quick');
+    if (shown(quick)) {
+      quick.click();
+      cycle = null;
+    } else if (now - cycle.since > MENU_TIMEOUT_MS) {
+      cycle = null;
+    }
+  };
+
   const step = async () => {
+    rematchStep();
     const ctx = readState();
     if (ctx) {
       settle(ctx);
@@ -829,11 +883,29 @@
     paint();
     loadRemote();
   });
+  const autoButton = document.createElement('button');
+  autoButton.style.cssText = buttonStyle;
+  autoButton.title = 'Rematch otomatis saat permainan berakhir. Bila 15 detik permainan tidak dimulai, '
+    + 'kembali ke menu lalu Quick match (Alt+R)';
+  const paintAuto = () => {
+    autoButton.textContent = '↻ Ulang: ' + (autoRematch ? 'NYALA' : 'MATI');
+    autoButton.style.background = autoRematch ? '#2563eb' : '#6b7280';
+  };
+  const toggleAuto = () => {
+    autoRematch = !autoRematch;
+    cycle = null;
+    paintAuto();
+  };
+  autoButton.addEventListener('click', toggleAuto);
   document.addEventListener('keydown', (e) => {
-    if (e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); toggle(); }
+    if (!e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'b') { e.preventDefault(); toggle(); }
+    if (key === 'r') { e.preventDefault(); toggleAuto(); }
   });
   paint();
-  box.append(button, exportButton, importButton, urlButton, reset, picker);
+  paintAuto();
+  box.append(button, autoButton, exportButton, importButton, urlButton, reset, picker);
   document.body.appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
