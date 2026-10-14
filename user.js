@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.3';
+  const VERSION = '4.4';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -17,7 +17,6 @@
   const LOST_SKIP_MOVES = 2;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
-  const SELF_KEY = 'wallrushBot.breakSelf';
   const OPPONENTS_KEY = 'wallrushBot.opponents';
   const OPPONENTS_CAP = 200;
   const SELF_PAUSE_MIN_MS = 5000;
@@ -30,10 +29,8 @@
   let enabled = false;
   let busy = false;
   let session = null;
-  let autoRematch = false;
   let cycle = null;
   let quickAt = 0;
-  let breakSelf = true;
   let holdUntil = 0;
   let overSeen = false;
   let workerFails = 0;
@@ -115,7 +112,6 @@
       return;
     }
   };
-  breakSelf = readSetting(SELF_KEY, '1') !== '0';
   const nickKey = (text) => String(text || '').trim().toLowerCase();
   const isSelfMatch = () => {
     const me = $('me-nick');
@@ -987,7 +983,7 @@
   };
 
   const rematchStep = () => {
-    if (!autoRematch || !enabled) {
+    if (!enabled) {
       cycle = null;
       quickAt = 0;
       return;
@@ -1008,7 +1004,7 @@
       if (!over) {
         cycle = null;
       } else {
-        const self = breakSelf && isSelfMatch();
+        const self = isSelfMatch();
         if (self || now - cycle.since >= REMATCH_DELAY_MS) {
           const rematch = $('btn-rematch');
           if (!self && shown(rematch)) {
@@ -1047,7 +1043,6 @@
     const over = Boolean(overlay && !overlay.hidden) && !(quad && !quad.hidden);
     if (over && !overSeen && enabled) {
       noteOpponent();
-      paintSelf();
     }
     overSeen = over;
   };
@@ -1059,7 +1054,6 @@
       cycle = null;
     }
     layout();
-    paintAuto();
     watchOver();
     const ctx = readState();
     if (ctx) {
@@ -1101,7 +1095,9 @@
     button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'NYALA' : 'MATI')
       + (played ? ` · ${wins}M ${losses}K` : '') + (compact ? '' : ' · ' + memoryLabel());
     button.style.background = enabled ? '#16a34a' : '#6b7280';
-    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
+    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Saat nyala: rematch otomatis, lalu Quick match '
+      + 'bila rematch tidak jalan; lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan untuk menghentikan siklus. '
+      + 'Pengalaman: ' + played
       + ' permainan, ' + avoidList().length + ' posisi kalah diingat, '
       + merged().records.length + ' rekaman posisi untuk pelatihan. '
       + (readUrl() ? 'Sumber memori: ' + readUrl() : 'Alamat GitHub belum diatur (tombol ☁).');
@@ -1191,72 +1187,23 @@
     paint();
     loadRemote();
   });
-  const autoButton = document.createElement('button');
-  autoButton.style.cssText = buttonStyle;
-  autoButton.title = 'Bekerja hanya bila Bot juga nyala. Rematch otomatis saat permainan berakhir; bila '
-    + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
-    + 'dijalankan. Matikan tombol ini kapan saja untuk menghentikan siklus (Alt+R)';
-  const autoLabel = () => {
-    if (!autoRematch) return '↻ Ulang: MATI';
-    if (!enabled) return '↻ Ulang: NYALA (Bot mati)';
-    if (!cycle) return '↻ Ulang: NYALA';
-    if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
-    if (cycle.phase === 'rematch') {
-      const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
-      return '↻ Ulang: tunggu ' + left + ' dtk';
-    }
-    return '↻ Ulang: Quick match...';
-  };
-  const paintAuto = () => {
-    const text = autoLabel();
-    if (autoButton.textContent !== text) autoButton.textContent = text;
-    autoButton.style.background = autoRematch ? '#2563eb' : '#6b7280';
-  };
-  const toggleAuto = () => {
-    autoRematch = !autoRematch;
-    cycle = null;
-    paintAuto();
-  };
-  autoButton.addEventListener('click', toggleAuto);
-  const selfButton = document.createElement('button');
-  selfButton.style.cssText = buttonStyle;
-  const paintSelf = () => {
-    const list = readOpponents();
-    const selfCount = list.filter((x) => x[2] === 1).length;
-    selfButton.textContent = '🔗 Diri: ' + (breakSelf ? 'PUTUS' : 'BEBAS');
-    selfButton.style.background = breakSelf ? '#b45309' : '#6b7280';
-    selfButton.title = 'PUTUS: bila lawan memakai nickname yang sama dengan akun ini, bot tidak rematch dan '
-      + 'menunggu 5-15 detik acak sebelum mencari lawan lagi, supaya kedua perangkat tidak mencari bersamaan. '
-      + 'BEBAS: rematch seperti biasa (untuk mengumpulkan data). Dari ' + list.length + ' game terakhir, '
-      + selfCount + ' melawan diri sendiri.';
-  };
-  selfButton.addEventListener('click', () => {
-    breakSelf = !breakSelf;
-    writeSetting(SELF_KEY, breakSelf ? '1' : '0');
-    paintSelf();
-  });
   const layout = () => {
     const inGame = document.documentElement.classList.contains('in-game');
     if (inGame === compact) return;
     compact = inGame;
     box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
     for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
-    for (const b of [button, autoButton, selfButton]) {
-      b.style.fontSize = compact ? '12px' : '13px';
-      b.style.padding = compact ? '5px 8px' : '6px 10px';
-    }
+    button.style.fontSize = compact ? '12px' : '13px';
+    button.style.padding = compact ? '5px 8px' : '6px 10px';
     paint();
   };
   document.addEventListener('keydown', (e) => {
     if (!e.altKey) return;
     const key = String(e.key || '').toLowerCase();
     if (key === 'b') { e.preventDefault(); toggle(); }
-    if (key === 'r') { e.preventDefault(); toggleAuto(); }
   });
   paint();
-  paintAuto();
-  paintSelf();
-  box.append(button, autoButton, selfButton, exportButton, importButton, urlButton, reset, picker);
+  box.append(button, exportButton, importButton, urlButton, reset, picker);
   ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
