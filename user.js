@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.2';
+  const VERSION = '4.3';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -10,7 +10,7 @@
   const RESTART_TIMEOUT_MS = 15000;
   const MENU_TIMEOUT_MS = 10000;
   const QUICK_RETRY_MS = 20000;
-  const FALLBACK_BUDGET_MS = 3000;
+  const FALLBACK_BUDGET_MS = 1500;
   const WORKER_FAILS = 3;
   const WORKER_GRACE_MS = 4000;
   const MIN_RECORD_PLIES = 6;
@@ -22,7 +22,7 @@
   const SELF_PAUSE_MIN_MS = 5000;
   const SELF_PAUSE_MAX_MS = 15000;
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
-  const MEMORY_CAP = 4000;
+  const MEMORY_CAP = 12000;
   const GAME_CAP = 5000;
   const RECORD_CAP = 300;
   const $ = (id) => document.getElementById(id);
@@ -78,8 +78,18 @@
       return;
     }
   };
+  const trimMemory = () => {
+    if (memory.won.length > MEMORY_CAP) {
+      const dropped = new Set(memory.won.slice(0, memory.won.length - MEMORY_CAP));
+      memory.won = memory.won.slice(-MEMORY_CAP);
+      memory.lost = memory.lost.filter((k) => !dropped.has(k));
+    }
+    if (memory.lost.length > MEMORY_CAP) memory.lost = memory.lost.slice(-MEMORY_CAP);
+  };
   const remember = (list, keys) => {
-    memory[list] = [...new Set([...memory[list], ...keys])].slice(-MEMORY_CAP);
+    const fresh = new Set(keys);
+    memory[list] = [...memory[list].filter((k) => !fresh.has(k)), ...fresh];
+    trimMemory();
   };
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const readUrl = () => {
@@ -138,11 +148,12 @@
       for (const [id, result] of s.games) games.set(id, result);
       for (const r of s.records) records.set(r[0], r);
     }
+    const won = new Set(sources.flatMap((s) => s.won));
     return {
       games: [...games],
       records: [...records.values()],
-      lost: [...new Set(sources.flatMap((s) => s.lost))],
-      won: [...new Set(sources.flatMap((s) => s.won))],
+      lost: [...new Set(sources.flatMap((s) => s.lost))].filter((k) => !won.has(k)),
+      won: [...won],
     };
   };
   const record = () => {
@@ -150,10 +161,10 @@
     const wins = games.reduce((n, g) => n + g[1], 0);
     return { wins, losses: games.length - wins };
   };
-  const avoidList = () => {
+  const avoidList = () => merged().lost;
+  const knowledge = () => {
     const all = merged();
-    const won = new Set(all.won);
-    return all.lost.filter((k) => !won.has(k));
+    return { avoid: all.lost, shield: all.won };
   };
   const memoryLabel = () => {
     if (remoteState === 'lokal') return 'memori lokal';
@@ -197,9 +208,14 @@
     const ttFlag = new Int8Array(TT_SIZE);
 
     const NEAR_WIN = 5000;
+    const TIME_EXT = 2;
+    const TIME_STABLE_CUT = 0.5;
+    const TIME_UNSTABLE_CUT = 0.55;
+    const TIME_DROP = 40;
     const DEFAULT_WEIGHTS = [58.2, 27.9, 93.6, -5.5, -5, 5.8, -7.5, 231.8, -153.2];
     const EW = DEFAULT_WEIGHTS;
     let avoid = null;
+    let shield = null;
     let bypass = false;
     let ttKey = '';
 
@@ -235,6 +251,7 @@
     let maps = [];
     let scratchA = null, scratchB = null;
     let fc = new Float64Array(81), bc = new Float64Array(81);
+    let cand = new Uint8Array(128);
 
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -261,6 +278,7 @@
       scratchB = new Int16Array(N);
       fc = new Float64Array(N);
       bc = new Float64Array(N);
+      cand = new Uint8Array(2 * S);
     };
 
     const mapsAt = (ply) => {
@@ -268,22 +286,33 @@
       return maps[ply];
     };
 
-    const bfsRow = (row, out) => {
+    const bfsRow = (row, out, target = -1) => {
       out.fill(-1);
       let head = 0, tail = 0;
       const base = row * W;
       for (let c = 0; c < W; c++) { out[base + c] = 0; queue[tail++] = base + c; }
+      if (target >= 0 && out[target] === 0) return;
       while (head < tail) {
         const cur = queue[head++];
         const b = blk[cur];
         const d1 = out[cur] + 1;
         const o = cur * 4;
-        for (let d = 0; d < 4; d++) {
-          if ((b >> d) & 1) continue;
-          const nx = nbr[o + d];
-          if (nx < 0 || out[nx] !== -1) continue;
-          out[nx] = d1;
-          queue[tail++] = nx;
+        let nx;
+        if ((b & 1) === 0) {
+          nx = nbr[o];
+          if (nx >= 0 && out[nx] === -1) { out[nx] = d1; if (nx === target) return; queue[tail++] = nx; }
+        }
+        if ((b & 2) === 0) {
+          nx = nbr[o + 1];
+          if (nx >= 0 && out[nx] === -1) { out[nx] = d1; if (nx === target) return; queue[tail++] = nx; }
+        }
+        if ((b & 4) === 0) {
+          nx = nbr[o + 2];
+          if (nx >= 0 && out[nx] === -1) { out[nx] = d1; if (nx === target) return; queue[tail++] = nx; }
+        }
+        if ((b & 8) === 0) {
+          nx = nbr[o + 3];
+          if (nx >= 0 && out[nx] === -1) { out[nx] = d1; if (nx === target) return; queue[tail++] = nx; }
         }
       }
     };
@@ -384,6 +413,7 @@
 
       const wm = [];
       if (left[p] > 0) {
+        cand.fill(0);
         const nq = bfsCell(pos[q], mFrom);
         for (let k = 0; k < nq; k++) { fc[queue[k]] = 0; bc[queue[k]] = 0; }
         fc[pos[q]] = 1;
@@ -406,7 +436,20 @@
           for (let d = 0; d < 4; d++) {
             if ((bk >> d) & 1) continue;
             const nx = nbr[o4 + d];
-            if (nx >= 0 && mFrom[nx] === nd && mOpp[nx] === mOpp[cur] - 1) sum += bc[nx];
+            if (nx >= 0 && mFrom[nx] === nd && mOpp[nx] === mOpp[cur] - 1) {
+              sum += bc[nx];
+              if (d < 2) {
+                const cc = cur % W;
+                const rr = ((cur / W) | 0) - (d === 0 ? 1 : 0);
+                if (cc < W - 1) cand[rr * (W - 1) + cc] = 1;
+                if (cc > 0) cand[rr * (W - 1) + cc - 1] = 1;
+              } else {
+                const rr = (cur / W) | 0;
+                const cc = (cur % W) - (d === 2 ? 1 : 0);
+                if (rr < H - 1) cand[S + rr * (W - 1) + cc] = 1;
+                if (rr > 0) cand[S + (rr - 1) * (W - 1) + cc] = 1;
+              }
+            }
           }
           bc[cur] = sum;
         }
@@ -419,21 +462,21 @@
         const cap = ply === 0 ? 24 : depth >= 4 ? 10 : depth === 3 ? 8 : 6;
         for (let o = 0; o < 2; o++) {
           for (let i = 0; i < S; i++) {
-            if (!slotFree(o, i)) continue;
+            if (!cand[o * S + i] || !slotFree(o, i)) continue;
             const a = wallCells(i);
             let e1a, e1b, e2a, e2b;
             if (o === 0) { e1a = a; e1b = a + W; e2a = a + 1; e2b = a + W + 1; }
             else { e1a = a; e1b = a + 1; e2a = a + W; e2b = a + W + 1; }
             if (through(e1a, e1b) + through(e2a, e2b) < total) continue;
             setWall(o, i, true);
-            bfsRow(goal[q], scratchA);
+            bfsRow(goal[q], scratchA, pos[q]);
             const newOpp = scratchA[pos[q]];
             let ok = newOpp > dOpp;
             let newMe = dMe;
             if (ok) {
               const tight = Math.abs(mMe[e1a] - mMe[e1b]) === 1 || Math.abs(mMe[e2a] - mMe[e2b]) === 1;
               if (tight) {
-                bfsRow(goal[p], scratchB);
+                bfsRow(goal[p], scratchB, pos[p]);
                 newMe = scratchB[pos[p]];
                 if (newMe < 0) ok = false;
               }
@@ -456,7 +499,7 @@
         const marks = list.map((m) => {
           if (m.win) return { again: false, bad: false };
           make(m);
-          const mark = { again: seen.has(k1), bad: Boolean(avoid && avoid.has(k1)) };
+          const mark = { again: seen.has(k1), bad: isBad() };
           unmake(m);
           return mark;
         });
@@ -505,6 +548,28 @@
         setWall(m.o, m.i, false);
       }
       turn = p;
+    };
+
+    const mirrorKey = () => {
+      if (W !== H) return k1;
+      const stride = W - 1;
+      let m1 = turn ? ZT1 : 0;
+      for (let i = 0; i < S; i++) {
+        const j = i - (i % stride) + (stride - 1 - (i % stride));
+        if (hw[i]) m1 ^= ZH1[j];
+        if (vw[i]) m1 ^= ZV1[j];
+      }
+      for (let p = 0; p < 2; p++) {
+        const r = rowOf[pos[p]];
+        m1 ^= ZP1[p][r * W + (W - 1 - (pos[p] - r * W))] ^ ZL1[p][left[p]];
+      }
+      return m1;
+    };
+
+    const isBad = () => {
+      if (!avoid) return false;
+      const mk = mirrorKey();
+      return (avoid.has(k1) || avoid.has(mk)) && !(shield && (shield.has(k1) || shield.has(mk)));
     };
 
     const toTT = (s, ply) => (s > MATE - 1000 ? s + ply : s < -MATE + 1000 ? s - ply : s);
@@ -599,6 +664,7 @@
 
     const ponder = (state, opts = {}) => {
       avoid = null;
+      shield = null;
       prepare(state);
       load(state);
       bypass = true;
@@ -615,15 +681,18 @@
       if (state.walls.length < prevWalls || opts.newGame) seen.clear();
       prevWalls = state.walls.length;
       avoid = opts.avoid ? new Set(opts.avoid) : null;
+      shield = opts.shield ? new Set(opts.shield) : null;
       prepare(state);
       load(state);
       seen.add(k1);
       nodes = 0; timedOut = false;
       const budget = opts.budgetMs || 1500;
       const start = now();
-      deadline = start + budget;
+      deadline = start + budget * TIME_EXT;
       let best = null;
       let reached = 0;
+      let prevCode = -1;
+      let prevScore = 0;
       for (let depth = 1; depth <= (opts.maxDepth || 40); depth++) {
         rootMove = null;
         const score = negamax(depth, -Infinity, Infinity, 0);
@@ -634,7 +703,12 @@
         best = rootMove;
         reached = depth;
         if (Math.abs(score) > MATE - 1000) break;
-        if (now() - start > budget * 0.55) break;
+        const code = codeOf(best);
+        const unstable = depth >= 3 && (code !== prevCode || score < prevScore - TIME_DROP);
+        prevCode = code;
+        prevScore = score;
+        const limit = unstable ? TIME_UNSTABLE_CUT * budget * TIME_EXT : TIME_STABLE_CUT * budget;
+        if (now() - start > limit) break;
       }
       chooseMove.last = { depth: reached, nodes, ms: Math.round(now() - start) };
       if (!best) return null;
@@ -656,7 +730,7 @@
     + 'if(m.ponder){const t0=Date.now();const run=()=>{'
     + 'if(id!==job||Date.now()-t0>' + PONDER_MS + ')return;'
     + 'engine.ponder(m.state,{budgetMs:100});setTimeout(run,0);};run();return;}'
-    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,avoid:m.avoid}));};';
+    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,avoid:m.avoid,shield:m.shield}));};';
   let worker = null;
   let mainEngine = null;
   let pending = null;
@@ -691,12 +765,12 @@
       ponderSig = '';
       workerFails++;
       reject(new Error('waktu habis'));
-    }, budgetMs + WORKER_GRACE_MS);
+    }, budgetMs * 2 + WORKER_GRACE_MS);
     pending = {
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (error) => { clearTimeout(timer); reject(error); },
     };
-    w.postMessage({ state, budgetMs, avoid: avoidList() });
+    w.postMessage({ state, budgetMs, ...knowledge() });
   });
 
   const budgetNow = () => {
@@ -712,7 +786,7 @@
       return await viaWorker(state, budgetMs);
     } catch {
       if (!mainEngine) mainEngine = engineMain();
-      return mainEngine.chooseMove(state, { budgetMs: Math.min(budgetMs, FALLBACK_BUDGET_MS), avoid: avoidList() });
+      return mainEngine.chooseMove(state, { budgetMs: Math.min(budgetMs, FALLBACK_BUDGET_MS), ...knowledge() });
     }
   };
 
@@ -855,6 +929,10 @@
     if (!result) {
       session.waiting = (session.waiting || 0) + 1;
       if (session.waiting > 12) session = null;
+      return;
+    }
+    if (result.ending === 1 && result.winner !== ctx.me) {
+      session = null;
       return;
     }
     if (session.keys.length && session.positions.length >= MIN_RECORD_PLIES) {
