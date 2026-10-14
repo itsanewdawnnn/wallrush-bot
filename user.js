@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '3.7';
+  const VERSION = '3.8';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -178,6 +178,7 @@
     let prevWalls = 0;
     let maps = [];
     let scratchA = null, scratchB = null;
+    let fc = new Float64Array(81), bc = new Float64Array(81);
 
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -202,6 +203,8 @@
       maps = [];
       scratchA = new Int16Array(N);
       scratchB = new Int16Array(N);
+      fc = new Float64Array(N);
+      bc = new Float64Array(N);
     };
 
     const mapsAt = (ply) => {
@@ -247,6 +250,7 @@
           queue[tail++] = nx;
         }
       }
+      return tail;
     };
 
     const wallCells = (i) => {
@@ -324,7 +328,38 @@
 
       const wm = [];
       if (left[p] > 0) {
-        bfsCell(pos[q], mFrom);
+        const nq = bfsCell(pos[q], mFrom);
+        for (let k = 0; k < nq; k++) { fc[queue[k]] = 0; bc[queue[k]] = 0; }
+        fc[pos[q]] = 1;
+        for (let k = 0; k < nq; k++) {
+          const cur = queue[k];
+          const f = fc[cur];
+          const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
+          for (let d = 0; d < 4; d++) {
+            if ((bk >> d) & 1) continue;
+            const nx = nbr[o4 + d];
+            if (nx >= 0 && mFrom[nx] === nd) fc[nx] += f;
+          }
+        }
+        for (let k = nq - 1; k >= 0; k--) {
+          const cur = queue[k];
+          if (mFrom[cur] + mOpp[cur] !== dOpp) continue;
+          if (mOpp[cur] === 0) { bc[cur] = 1; continue; }
+          let sum = 0;
+          const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
+          for (let d = 0; d < 4; d++) {
+            if ((bk >> d) & 1) continue;
+            const nx = nbr[o4 + d];
+            if (nx >= 0 && mFrom[nx] === nd && mOpp[nx] === mOpp[cur] - 1) sum += bc[nx];
+          }
+          bc[cur] = sum;
+        }
+        const total = bc[pos[q]];
+        const through = (x, y) => {
+          if (mFrom[x] + 1 + mOpp[y] === dOpp) return fc[x] * bc[y];
+          if (mFrom[y] + 1 + mOpp[x] === dOpp) return fc[y] * bc[x];
+          return 0;
+        };
         const cap = ply === 0 ? 24 : depth >= 4 ? 10 : depth === 3 ? 8 : 6;
         for (let o = 0; o < 2; o++) {
           for (let i = 0; i < S; i++) {
@@ -333,9 +368,7 @@
             let e1a, e1b, e2a, e2b;
             if (o === 0) { e1a = a; e1b = a + W; e2a = a + 1; e2b = a + W + 1; }
             else { e1a = a; e1b = a + 1; e2a = a + W; e2b = a + W + 1; }
-            const onPath = (x, y) => mFrom[x] >= 0 && mFrom[y] >= 0 &&
-              (mFrom[x] + 1 + mOpp[y] === dOpp || mFrom[y] + 1 + mOpp[x] === dOpp);
-            if (!onPath(e1a, e1b) && !onPath(e2a, e2b)) continue;
+            if (through(e1a, e1b) + through(e2a, e2b) < total) continue;
             setWall(o, i, true);
             bfsRow(goal[q], scratchA);
             const newOpp = scratchA[pos[q]];
