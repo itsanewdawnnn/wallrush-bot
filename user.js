@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.1';
+  const VERSION = '4.2';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -1145,7 +1145,7 @@
     selfButton.textContent = '🔗 Diri: ' + (breakSelf ? 'PUTUS' : 'BEBAS');
     selfButton.style.background = breakSelf ? '#b45309' : '#6b7280';
     selfButton.title = 'PUTUS: bila lawan memakai nickname yang sama dengan akun ini, bot tidak rematch dan '
-      + 'menunggu 5-45 detik acak sebelum mencari lawan lagi, supaya kedua perangkat tidak mencari bersamaan. '
+      + 'menunggu 5-15 detik acak sebelum mencari lawan lagi, supaya kedua perangkat tidak mencari bersamaan. '
       + 'BEBAS: rematch seperti biasa (untuk mengumpulkan data). Dari ' + list.length + ' game terakhir, '
       + selfCount + ' melawan diri sendiri.';
   };
