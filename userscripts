@@ -1,0 +1,31 @@
+ // ==UserScript==
+ // @name         WallRush Bot
+ // @namespace    wallrush-helper
+ // @match        https://wallrush.online/*
+ // @run-at       document-idle
+ // @grant        none
+ // ==/UserScript==
+
+ (async () => {
+   const url =
+     'https://raw.githubusercontent.com/itsanewdawnnn/wallrush-bot/refs/heads/main/user.js';
+
+   try {
+     const response = await fetch(url + '?t=' + Date.now(), {
+       cache: 'no-store'
+     });
+
+     if (!response.ok) {
+       throw new Error('HTTP ' + response.status);
+     }
+
+     const code = await response.text();
+     const script = document.createElement('script');
+
+     script.textContent = code;
+     (document.head || document.documentElement).appendChild(script);
+     script.remove();
+   } catch (error) {
+     console.error('[WallRush Bot] Error:', error);
+   }
+ })();
