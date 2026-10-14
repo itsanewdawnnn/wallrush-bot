@@ -20,7 +20,7 @@
   const OPPONENTS_KEY = 'wallrushBot.opponents';
   const OPPONENTS_CAP = 200;
   const SELF_PAUSE_MIN_MS = 5000;
-  const SELF_PAUSE_MAX_MS = 45000;
+  const SELF_PAUSE_MAX_MS = 15000;
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 4000;
   const GAME_CAP = 5000;
