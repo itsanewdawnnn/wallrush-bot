@@ -1,11 +1,12 @@
 (() => {
-  const VERSION = '3.8';
+  const VERSION = '3.9';
   const BUDGET_MS = 3000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
   const REMATCH_DELAY_MS = 2000;
   const RESTART_TIMEOUT_MS = 15000;
   const MENU_TIMEOUT_MS = 10000;
+  const QUICK_RETRY_MS = 20000;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
@@ -18,6 +19,7 @@
   let session = null;
   let autoRematch = false;
   let cycle = null;
+  let quickAt = 0;
 
   const toInts = (list) => (Array.isArray(list) ? list.filter((k) => Number.isInteger(k)) : []);
   const toGames = (data) => {
@@ -750,6 +752,17 @@
     cycle = { phase: 'menu', since: Date.now() };
   };
 
+  const startFromMenu = (now) => {
+    const quick = $('btn-quick');
+    if (!enabled || !shown(quick)) {
+      quickAt = 0;
+      return;
+    }
+    if (now - quickAt < QUICK_RETRY_MS) return;
+    quick.click();
+    quickAt = now;
+  };
+
   const rematchStep = () => {
     if (!autoRematch) {
       cycle = null;
@@ -760,7 +773,11 @@
     const now = Date.now();
     if (!cycle) {
       const quad = $('quad-result');
-      if (over && !(quad && !quad.hidden)) cycle = { phase: 'wait', since: now };
+      if (over) {
+        if (!(quad && !quad.hidden)) cycle = { phase: 'wait', since: now };
+      } else {
+        startFromMenu(now);
+      }
       return;
     }
     if (cycle.phase === 'wait') {
@@ -785,6 +802,7 @@
     const quick = $('btn-quick');
     if (shown(quick)) {
       quick.click();
+      quickAt = now;
       cycle = null;
     } else if (now - cycle.since > MENU_TIMEOUT_MS) {
       cycle = null;
@@ -926,7 +944,8 @@
   const autoButton = document.createElement('button');
   autoButton.style.cssText = buttonStyle;
   autoButton.title = 'Rematch otomatis saat permainan berakhir. Bila 15 detik permainan tidak dimulai, '
-    + 'kembali ke menu lalu Quick match (Alt+R)';
+    + 'kembali ke menu lalu Quick match. Bila Bot juga nyala, Quick match langsung dijalankan dari menu. '
+    + 'Matikan tombol ini kapan saja untuk menghentikan siklus (Alt+R)';
   const autoLabel = () => {
     if (!autoRematch) return '↻ Ulang: MATI';
     if (!cycle) return '↻ Ulang: NYALA';
