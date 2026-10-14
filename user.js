@@ -411,6 +411,8 @@
         pm.push({ t: 0, i: t, ord: -mMe[t], win, ev: win ? MATE : stat(mMe[t], dOpp, left[p], left[q]) });
       }
       pm.sort((a, b) => b.ord - a.ord);
+      const forward = pm.filter((m) => mMe[m.i] < dMe);
+      if (forward.length) pm.splice(0, pm.length, ...forward);
 
       const wm = [];
       if (left[p] > 0) {
