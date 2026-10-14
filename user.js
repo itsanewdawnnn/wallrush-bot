@@ -1,14 +1,25 @@
 (() => {
-  const VERSION = '3.9';
-  const BUDGET_MS = 3000;
+  const VERSION = '4.0';
+  const BUDGET_MS = 6000;
+  const MIN_BUDGET_MS = 300;
+  const BANK_MOVES = 20;
+  const PONDER_MS = 20000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
   const REMATCH_DELAY_MS = 2000;
   const RESTART_TIMEOUT_MS = 15000;
   const MENU_TIMEOUT_MS = 10000;
   const QUICK_RETRY_MS = 20000;
+  const FALLBACK_BUDGET_MS = 3000;
+  const WORKER_FAILS = 3;
+  const WORKER_GRACE_MS = 4000;
+  const MIN_RECORD_PLIES = 6;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
+  const SLOT_KEY = 'wallrushBot.slot';
+  const SLOT_CYCLE_MS = 60000;
+  const SLOT_WINDOW_MS = 20000;
+  const SLOT_OFFSETS = { A: 0, B: 30000 };
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 4000;
   const GAME_CAP = 5000;
@@ -20,6 +31,9 @@
   let autoRematch = false;
   let cycle = null;
   let quickAt = 0;
+  let slot = '';
+  let searchAt = 0;
+  let workerFails = 0;
 
   const toInts = (list) => (Array.isArray(list) ? list.filter((k) => Number.isInteger(k)) : []);
   const toGames = (data) => {
@@ -73,6 +87,24 @@
       return '';
     }
   };
+  const readSetting = (key, fallback) => {
+    try {
+      const value = localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch (e) {
+      return fallback;
+    }
+  };
+  const writeSetting = (key, value) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch (e) {
+      return;
+    }
+  };
+  slot = ['A', 'B'].includes(readSetting(SLOT_KEY, '')) ? readSetting(SLOT_KEY, '') : '';
+  const slotPos = (now) => (now - SLOT_OFFSETS[slot]) % SLOT_CYCLE_MS;
+  const inSlot = (now) => !slot || slotPos(now) < SLOT_WINDOW_MS;
 
   let remote = null;
   let remoteVersion = '';
@@ -148,6 +180,8 @@
     const DEFAULT_WEIGHTS = [58.2, 27.9, 93.6, -5.5, -5, 5.8, -7.5, 231.8, -153.2];
     const EW = DEFAULT_WEIGHTS;
     let avoid = null;
+    let bypass = false;
+    let ttKey = '';
 
     let seed = 0x5eed1234;
     const rand = () => {
@@ -398,7 +432,7 @@
       if (pm.length) list.push(pm[0]);
       for (const w of wm) list.push(w);
       for (let k = 1; k < pm.length; k++) list.push(pm[k]);
-      if (ply === 0 && (seen.size || avoid)) {
+      if (ply === 0 && !bypass && (seen.size || avoid)) {
         const marks = list.map((m) => {
           if (m.win) return { again: false, bad: false };
           make(m);
@@ -453,6 +487,9 @@
       turn = p;
     };
 
+    const toTT = (s, ply) => (s > MATE - 1000 ? s + ply : s < -MATE + 1000 ? s - ply : s);
+    const fromTT = (s, ply) => (s > MATE - 1000 ? s - ply : s < -MATE + 1000 ? s + ply : s);
+
     const negamax = (depth, alpha, beta, ply) => {
       if ((++nodes & 255) === 0 && now() > deadline) timedOut = true;
       if (timedOut) return 0;
@@ -462,7 +499,7 @@
       if (ply > 0 && ttChk[idx] === k2 && ttDepth[idx] > 0) {
         ttm = ttMove[idx];
         if (ttDepth[idx] >= depth) {
-          const f = ttFlag[idx], s = ttScore[idx];
+          const f = ttFlag[idx], s = fromTT(ttScore[idx], ply);
           if (f === 0) return s;
           if (f === 1 && s >= beta) return s;
           if (f === -1 && s <= alpha) return s;
@@ -505,7 +542,7 @@
         if (alpha >= beta) break;
       }
       ttChk[idx] = k2;
-      ttScore[idx] = best;
+      ttScore[idx] = toTT(best, ply);
       ttMove[idx] = bestCode;
       ttDepth[idx] = depth;
       ttFlag[idx] = best <= alpha0 ? -1 : best >= beta ? 1 : 0;
@@ -532,13 +569,35 @@
       if (turn) { k1 ^= ZT1; k2 ^= ZT2; }
     };
 
+    const prepare = (state) => {
+      const key = state.mode + ':' + (state.cols || 9) + ':' + (state.rows || 9);
+      if (key === ttKey) return;
+      ttKey = key;
+      ttChk.fill(0);
+      ttDepth.fill(0);
+    };
+
+    const ponder = (state, opts = {}) => {
+      avoid = null;
+      prepare(state);
+      load(state);
+      bypass = true;
+      nodes = 0; timedOut = false;
+      deadline = now() + (opts.budgetMs || 100);
+      for (let depth = 1; depth <= 40; depth++) {
+        const score = negamax(depth, -Infinity, Infinity, 0);
+        if (timedOut || Math.abs(score) > MATE - 1000) break;
+      }
+      bypass = false;
+    };
+
     const chooseMove = (state, opts = {}) => {
       if (state.walls.length < prevWalls || opts.newGame) seen.clear();
       prevWalls = state.walls.length;
       avoid = opts.avoid ? new Set(opts.avoid) : null;
+      prepare(state);
       load(state);
       seen.add(k1);
-      ttChk.fill(0); ttDepth.fill(0);
       nodes = 0; timedOut = false;
       const budget = opts.budgetMs || 1500;
       const start = now();
@@ -549,7 +608,7 @@
         rootMove = null;
         const score = negamax(depth, -Infinity, Infinity, 0);
         if (timedOut) {
-          if (rootMove && best === null) best = rootMove;
+          if (rootMove) best = rootMove;
           break;
         }
         best = rootMove;
@@ -568,30 +627,92 @@
       return { type: 'wall', o: best.o === 0 ? 'h' : 'v', r, c, key };
     };
 
-    return { chooseMove };
+    return { chooseMove, ponder };
   }
 
-  const WORKER_SRC = 'const engine=(' + engineMain.toString() + ')();'
-    + 'onmessage=(e)=>{postMessage(engine.chooseMove(e.data.state,{budgetMs:e.data.budgetMs,avoid:e.data.avoid}));};';
+  const WORKER_SRC = 'const engine=(' + engineMain.toString() + ')();let job=0;'
+    + 'onmessage=(e)=>{const m=e.data,id=++job;'
+    + 'if(m.stop)return;'
+    + 'if(m.ponder){const t0=Date.now();const run=()=>{'
+    + 'if(id!==job||Date.now()-t0>' + PONDER_MS + ')return;'
+    + 'engine.ponder(m.state,{budgetMs:100});setTimeout(run,0);};run();return;}'
+    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,avoid:m.avoid}));};';
   let worker = null;
   let mainEngine = null;
+  let pending = null;
+  let ponderSig = '';
 
-  const viaWorker = (state) => new Promise((resolve, reject) => {
+  const makeWorker = () => {
     if (!worker) {
-      worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+      const w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
+      w.onmessage = (e) => {
+        workerFails = 0;
+        if (pending) pending.resolve(e.data);
+        pending = null;
+      };
+      w.onerror = () => {
+        worker = null;
+        ponderSig = '';
+        workerFails++;
+        if (pending) pending.reject();
+        pending = null;
+      };
+      worker = w;
     }
-    worker.onmessage = (e) => resolve(e.data);
-    worker.onerror = (e) => { worker = null; reject(e); };
-    worker.postMessage({ state, budgetMs: BUDGET_MS, avoid: avoidList() });
+    return worker;
+  };
+
+  const viaWorker = (state, budgetMs) => new Promise((resolve, reject) => {
+    const w = makeWorker();
+    const timer = setTimeout(() => {
+      pending = null;
+      w.terminate();
+      worker = null;
+      ponderSig = '';
+      workerFails++;
+      reject(new Error('waktu habis'));
+    }, budgetMs + WORKER_GRACE_MS);
+    pending = {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    };
+    w.postMessage({ state, budgetMs, avoid: avoidList() });
   });
 
+  const budgetNow = () => {
+    const m = /^(\d+):(\d\d)$/.exec(($('me-clock') || {}).textContent || '');
+    const bank = m ? (+m[1] * 60 + +m[2]) * 1000 : Infinity;
+    return Math.max(MIN_BUDGET_MS, Math.min(BUDGET_MS, bank / BANK_MOVES));
+  };
+
   const think = async (state) => {
+    const budgetMs = budgetNow();
     try {
-      return await viaWorker(state);
+      if (workerFails >= WORKER_FAILS) throw new Error('worker dimatikan');
+      return await viaWorker(state, budgetMs);
     } catch {
       if (!mainEngine) mainEngine = engineMain();
-      return mainEngine.chooseMove(state, { budgetMs: BUDGET_MS, avoid: avoidList() });
+      return mainEngine.chooseMove(state, { budgetMs: Math.min(budgetMs, FALLBACK_BUDGET_MS), avoid: avoidList() });
     }
+  };
+
+  const ponderOn = (state) => {
+    if (workerFails >= WORKER_FAILS) return;
+    const sig = JSON.stringify([state.pawns, state.walls, state.left, state.turn]);
+    if (sig === ponderSig) return;
+    ponderSig = sig;
+    try {
+      makeWorker().postMessage({ ponder: true, state });
+    } catch {
+      worker = null;
+      workerFails++;
+    }
+  };
+
+  const ponderOff = () => {
+    if (!ponderSig) return;
+    ponderSig = '';
+    if (worker) worker.postMessage({ stop: true });
   };
 
   const center = (el) => {
@@ -716,7 +837,7 @@
       if (session.waiting > 12) session = null;
       return;
     }
-    if (session.keys.length) {
+    if (session.keys.length && session.positions.length >= MIN_RECORD_PLIES) {
       const won = result.winner === ctx.me;
       const id = newId();
       const wallInts = state.walls.map((w) => w.r * 100 + w.c * 10 + (w.o === 'v' ? 1 : 0));
@@ -748,29 +869,41 @@
   const shown = (el) => Boolean(el && !el.hidden && el.offsetParent !== null);
 
   const toMenu = () => {
-    $('btn-to-menu').click();
+    const menu = $('btn-to-menu');
+    if (menu) menu.click();
     cycle = { phase: 'menu', since: Date.now() };
   };
 
   const startFromMenu = (now) => {
     const quick = $('btn-quick');
-    if (!enabled || !shown(quick)) {
+    if (!shown(quick)) {
       quickAt = 0;
       return;
     }
-    if (now - quickAt < QUICK_RETRY_MS) return;
+    if (!inSlot(now) || now - quickAt < QUICK_RETRY_MS) return;
     quick.click();
     quickAt = now;
+    searchAt = now;
   };
 
   const rematchStep = () => {
-    if (!autoRematch) {
+    if (!autoRematch || !enabled) {
       cycle = null;
+      quickAt = 0;
+      searchAt = 0;
       return;
     }
     const overlay = $('overlay-gameover');
     const over = Boolean(overlay && !overlay.hidden);
     const now = Date.now();
+    const waiting = $('screen-waiting');
+    if (!(waiting && waiting.classList.contains('active'))) {
+      searchAt = 0;
+    } else if (searchAt && !inSlot(now)) {
+      const cancel = $('btn-cancel-wait');
+      if (cancel) cancel.click();
+      searchAt = 0;
+    }
     if (!cycle) {
       const quad = $('quad-result');
       if (over) {
@@ -801,30 +934,42 @@
     }
     const quick = $('btn-quick');
     if (shown(quick)) {
-      quick.click();
-      quickAt = now;
-      cycle = null;
+      if (inSlot(now)) {
+        quick.click();
+        quickAt = now;
+        searchAt = now;
+        cycle = null;
+      }
     } else if (now - cycle.since > MENU_TIMEOUT_MS) {
       cycle = null;
     }
   };
 
+  const positionKey = (s) => JSON.stringify([s.pawns, s.left, s.walls.map((w) => w.r + ',' + w.c + w.o).sort()]);
+
   const step = async () => {
-    rematchStep();
+    try {
+      rematchStep();
+    } catch (e) {
+      cycle = null;
+    }
     layout();
     paintAuto();
+    paintSlot();
     const ctx = readState();
     if (ctx) {
       settle(ctx);
       observe(ctx);
     }
+    if (enabled && ctx && ctx.state.turn !== null && ctx.state.turn !== ctx.me) ponderOn(ctx.state);
+    else ponderOff();
     if (!enabled || busy) return;
     if (!ctx || ctx.state.turn !== ctx.me) return;
     busy = true;
     try {
       const move = await think(ctx.state);
       const now = readState();
-      if (enabled && move && now && now.state.turn === now.me) {
+      if (enabled && move && now && now.state.turn === now.me && positionKey(now.state) === positionKey(ctx.state)) {
         play(now, move);
         if (!session) session = newSession(now.state);
         session.keys.push(move.key);
@@ -943,11 +1088,12 @@
   });
   const autoButton = document.createElement('button');
   autoButton.style.cssText = buttonStyle;
-  autoButton.title = 'Rematch otomatis saat permainan berakhir. Bila 15 detik permainan tidak dimulai, '
-    + 'kembali ke menu lalu Quick match. Bila Bot juga nyala, Quick match langsung dijalankan dari menu. '
-    + 'Matikan tombol ini kapan saja untuk menghentikan siklus (Alt+R)';
+  autoButton.title = 'Bekerja hanya bila Bot juga nyala. Rematch otomatis saat permainan berakhir; bila '
+    + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
+    + 'dijalankan. Matikan tombol ini kapan saja untuk menghentikan siklus (Alt+R)';
   const autoLabel = () => {
     if (!autoRematch) return '↻ Ulang: MATI';
+    if (!enabled) return '↻ Ulang: NYALA (Bot mati)';
     if (!cycle) return '↻ Ulang: NYALA';
     if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
     if (cycle.phase === 'rematch') {
@@ -967,13 +1113,35 @@
     paintAuto();
   };
   autoButton.addEventListener('click', toggleAuto);
+  const slotButton = document.createElement('button');
+  slotButton.style.cssText = buttonStyle;
+  slotButton.title = 'Pembagian waktu untuk dua perangkat: beri perangkat ini A dan perangkat lain B. '
+    + 'Setiap menit, A hanya mencari lawan pada detik 0-20 dan B pada detik 30-50, pencarian yang melewati '
+    + 'jendelanya dibatalkan, sehingga keduanya tidak pernah dipasangkan satu sama lain. Jam kedua perangkat '
+    + 'harus tepat. BEBAS: mencari kapan saja (boleh bertemu perangkat sendiri untuk mengumpulkan data)';
+  const paintSlot = () => {
+    let text = '⏱ Slot: BEBAS';
+    if (slot) {
+      const pos = slotPos(Date.now());
+      text = '⏱ Slot ' + slot + (pos < SLOT_WINDOW_MS
+        ? ': cari ' + Math.ceil((SLOT_WINDOW_MS - pos) / 1000) + ' dtk'
+        : ': tunggu ' + Math.ceil((SLOT_CYCLE_MS - pos) / 1000) + ' dtk');
+    }
+    if (slotButton.textContent !== text) slotButton.textContent = text;
+    slotButton.style.background = slot ? '#b45309' : '#6b7280';
+  };
+  slotButton.addEventListener('click', () => {
+    slot = slot === '' ? 'A' : slot === 'A' ? 'B' : '';
+    writeSetting(SLOT_KEY, slot);
+    paintSlot();
+  });
   const layout = () => {
     const inGame = document.documentElement.classList.contains('in-game');
     if (inGame === compact) return;
     compact = inGame;
     box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
     for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
-    for (const b of [button, autoButton]) {
+    for (const b of [button, autoButton, slotButton]) {
       b.style.fontSize = compact ? '12px' : '13px';
       b.style.padding = compact ? '5px 8px' : '6px 10px';
     }
@@ -981,13 +1149,14 @@
   };
   document.addEventListener('keydown', (e) => {
     if (!e.altKey) return;
-    const key = e.key.toLowerCase();
+    const key = String(e.key || '').toLowerCase();
     if (key === 'b') { e.preventDefault(); toggle(); }
     if (key === 'r') { e.preventDefault(); toggleAuto(); }
   });
   paint();
   paintAuto();
-  box.append(button, autoButton, exportButton, importButton, urlButton, reset, picker);
+  paintSlot();
+  box.append(button, autoButton, slotButton, exportButton, importButton, urlButton, reset, picker);
   ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
