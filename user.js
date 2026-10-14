@@ -14,6 +14,7 @@
   const WORKER_FAILS = 3;
   const WORKER_GRACE_MS = 4000;
   const MIN_RECORD_PLIES = 6;
+  const LOST_SKIP_MOVES = 2;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
   const SELF_KEY = 'wallrushBot.breakSelf';
@@ -939,7 +940,7 @@
       const won = result.winner === ctx.me;
       const id = newId();
       const wallInts = state.walls.map((w) => w.r * 100 + w.c * 10 + (w.o === 'v' ? 1 : 0));
-      remember(won ? 'won' : 'lost', session.keys);
+      remember(won ? 'won' : 'lost', won ? session.keys : session.keys.slice(LOST_SKIP_MOVES));
       memory.games = [...memory.games, [id, won ? 1 : 0]].slice(-GAME_CAP);
       memory.records = [...memory.records,
         [id, state.mode === 'race' ? 1 : 0, result.winner, wallInts, session.positions, result.ending]]
