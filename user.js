@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.0';
+  const VERSION = '4.1';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -16,10 +16,11 @@
   const MIN_RECORD_PLIES = 6;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
-  const SLOT_KEY = 'wallrushBot.slot';
-  const SLOT_CYCLE_MS = 60000;
-  const SLOT_WINDOW_MS = 20000;
-  const SLOT_OFFSETS = { A: 0, B: 30000 };
+  const SELF_KEY = 'wallrushBot.breakSelf';
+  const OPPONENTS_KEY = 'wallrushBot.opponents';
+  const OPPONENTS_CAP = 200;
+  const SELF_PAUSE_MIN_MS = 5000;
+  const SELF_PAUSE_MAX_MS = 45000;
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 4000;
   const GAME_CAP = 5000;
@@ -31,8 +32,9 @@
   let autoRematch = false;
   let cycle = null;
   let quickAt = 0;
-  let slot = '';
-  let searchAt = 0;
+  let breakSelf = true;
+  let holdUntil = 0;
+  let overSeen = false;
   let workerFails = 0;
 
   const toInts = (list) => (Array.isArray(list) ? list.filter((k) => Number.isInteger(k)) : []);
@@ -102,9 +104,27 @@
       return;
     }
   };
-  slot = ['A', 'B'].includes(readSetting(SLOT_KEY, '')) ? readSetting(SLOT_KEY, '') : '';
-  const slotPos = (now) => (now - SLOT_OFFSETS[slot]) % SLOT_CYCLE_MS;
-  const inSlot = (now) => !slot || slotPos(now) < SLOT_WINDOW_MS;
+  breakSelf = readSetting(SELF_KEY, '1') !== '0';
+  const nickKey = (text) => String(text || '').trim().toLowerCase();
+  const isSelfMatch = () => {
+    const me = $('me-nick');
+    const opp = $('opp-nick');
+    const other = opp ? nickKey(opp.textContent) : '';
+    return other !== '' && Boolean(me) && other === nickKey(me.textContent);
+  };
+  const readOpponents = () => {
+    try {
+      const list = JSON.parse(readSetting(OPPONENTS_KEY, '[]'));
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  };
+  const noteOpponent = () => {
+    const opp = $('opp-nick');
+    const list = [...readOpponents(), [Date.now(), opp ? opp.textContent.trim() : '', isSelfMatch() ? 1 : 0]];
+    writeSetting(OPPONENTS_KEY, JSON.stringify(list.slice(-OPPONENTS_CAP)));
+  };
 
   let remote = null;
   let remoteVersion = '';
@@ -880,30 +900,20 @@
       quickAt = 0;
       return;
     }
-    if (!inSlot(now) || now - quickAt < QUICK_RETRY_MS) return;
+    if (now < holdUntil || now - quickAt < QUICK_RETRY_MS) return;
     quick.click();
     quickAt = now;
-    searchAt = now;
   };
 
   const rematchStep = () => {
     if (!autoRematch || !enabled) {
       cycle = null;
       quickAt = 0;
-      searchAt = 0;
       return;
     }
     const overlay = $('overlay-gameover');
     const over = Boolean(overlay && !overlay.hidden);
     const now = Date.now();
-    const waiting = $('screen-waiting');
-    if (!(waiting && waiting.classList.contains('active'))) {
-      searchAt = 0;
-    } else if (searchAt && !inSlot(now)) {
-      const cancel = $('btn-cancel-wait');
-      if (cancel) cancel.click();
-      searchAt = 0;
-    }
     if (!cycle) {
       const quad = $('quad-result');
       if (over) {
@@ -916,13 +926,17 @@
     if (cycle.phase === 'wait') {
       if (!over) {
         cycle = null;
-      } else if (now - cycle.since >= REMATCH_DELAY_MS) {
-        const rematch = $('btn-rematch');
-        if (shown(rematch)) {
-          rematch.click();
-          cycle = { phase: 'rematch', since: now };
-        } else {
-          toMenu();
+      } else {
+        const self = breakSelf && isSelfMatch();
+        if (self || now - cycle.since >= REMATCH_DELAY_MS) {
+          const rematch = $('btn-rematch');
+          if (!self && shown(rematch)) {
+            rematch.click();
+            cycle = { phase: 'rematch', since: now };
+          } else {
+            if (self) holdUntil = now + SELF_PAUSE_MIN_MS + Math.random() * (SELF_PAUSE_MAX_MS - SELF_PAUSE_MIN_MS);
+            toMenu();
+          }
         }
       }
       return;
@@ -934,10 +948,9 @@
     }
     const quick = $('btn-quick');
     if (shown(quick)) {
-      if (inSlot(now)) {
+      if (now >= holdUntil) {
         quick.click();
         quickAt = now;
-        searchAt = now;
         cycle = null;
       }
     } else if (now - cycle.since > MENU_TIMEOUT_MS) {
@@ -947,6 +960,17 @@
 
   const positionKey = (s) => JSON.stringify([s.pawns, s.left, s.walls.map((w) => w.r + ',' + w.c + w.o).sort()]);
 
+  const watchOver = () => {
+    const overlay = $('overlay-gameover');
+    const quad = $('quad-result');
+    const over = Boolean(overlay && !overlay.hidden) && !(quad && !quad.hidden);
+    if (over && !overSeen && enabled) {
+      noteOpponent();
+      paintSelf();
+    }
+    overSeen = over;
+  };
+
   const step = async () => {
     try {
       rematchStep();
@@ -955,7 +979,7 @@
     }
     layout();
     paintAuto();
-    paintSlot();
+    watchOver();
     const ctx = readState();
     if (ctx) {
       settle(ctx);
@@ -1020,7 +1044,7 @@
   const exportMemory = () => {
     const versi = new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([JSON.stringify({ versi, ...merged() })], { type: 'application/json' }));
+    link.href = URL.createObjectURL(new Blob([JSON.stringify({ versi, ...merged(), lawan: readOpponents() })], { type: 'application/json' }));
     link.download = 'wallrush-bot-memori.json';
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
@@ -1113,27 +1137,22 @@
     paintAuto();
   };
   autoButton.addEventListener('click', toggleAuto);
-  const slotButton = document.createElement('button');
-  slotButton.style.cssText = buttonStyle;
-  slotButton.title = 'Pembagian waktu untuk dua perangkat: beri perangkat ini A dan perangkat lain B. '
-    + 'Setiap menit, A hanya mencari lawan pada detik 0-20 dan B pada detik 30-50, pencarian yang melewati '
-    + 'jendelanya dibatalkan, sehingga keduanya tidak pernah dipasangkan satu sama lain. Jam kedua perangkat '
-    + 'harus tepat. BEBAS: mencari kapan saja (boleh bertemu perangkat sendiri untuk mengumpulkan data)';
-  const paintSlot = () => {
-    let text = '⏱ Slot: BEBAS';
-    if (slot) {
-      const pos = slotPos(Date.now());
-      text = '⏱ Slot ' + slot + (pos < SLOT_WINDOW_MS
-        ? ': cari ' + Math.ceil((SLOT_WINDOW_MS - pos) / 1000) + ' dtk'
-        : ': tunggu ' + Math.ceil((SLOT_CYCLE_MS - pos) / 1000) + ' dtk');
-    }
-    if (slotButton.textContent !== text) slotButton.textContent = text;
-    slotButton.style.background = slot ? '#b45309' : '#6b7280';
+  const selfButton = document.createElement('button');
+  selfButton.style.cssText = buttonStyle;
+  const paintSelf = () => {
+    const list = readOpponents();
+    const selfCount = list.filter((x) => x[2] === 1).length;
+    selfButton.textContent = '🔗 Diri: ' + (breakSelf ? 'PUTUS' : 'BEBAS');
+    selfButton.style.background = breakSelf ? '#b45309' : '#6b7280';
+    selfButton.title = 'PUTUS: bila lawan memakai nickname yang sama dengan akun ini, bot tidak rematch dan '
+      + 'menunggu 5-45 detik acak sebelum mencari lawan lagi, supaya kedua perangkat tidak mencari bersamaan. '
+      + 'BEBAS: rematch seperti biasa (untuk mengumpulkan data). Dari ' + list.length + ' game terakhir, '
+      + selfCount + ' melawan diri sendiri.';
   };
-  slotButton.addEventListener('click', () => {
-    slot = slot === '' ? 'A' : slot === 'A' ? 'B' : '';
-    writeSetting(SLOT_KEY, slot);
-    paintSlot();
+  selfButton.addEventListener('click', () => {
+    breakSelf = !breakSelf;
+    writeSetting(SELF_KEY, breakSelf ? '1' : '0');
+    paintSelf();
   });
   const layout = () => {
     const inGame = document.documentElement.classList.contains('in-game');
@@ -1141,7 +1160,7 @@
     compact = inGame;
     box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
     for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
-    for (const b of [button, autoButton, slotButton]) {
+    for (const b of [button, autoButton, selfButton]) {
       b.style.fontSize = compact ? '12px' : '13px';
       b.style.padding = compact ? '5px 8px' : '6px 10px';
     }
@@ -1155,8 +1174,8 @@
   });
   paint();
   paintAuto();
-  paintSlot();
-  box.append(button, autoButton, slotButton, exportButton, importButton, urlButton, reset, picker);
+  paintSelf();
+  box.append(button, autoButton, selfButton, exportButton, importButton, urlButton, reset, picker);
   ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
