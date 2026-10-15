@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.4';
+  const VERSION = '4.5';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -249,11 +249,21 @@
     let scratchA = null, scratchB = null;
     let fc = new Float64Array(81), bc = new Float64Array(81);
     let cand = new Uint8Array(128);
+    const DM_SIZE = 1 << 12;
+    const dmChk = new Int32Array(DM_SIZE);
+    const dmTag = new Int32Array(DM_SIZE);
+    const dmMaps = new Array(DM_SIZE).fill(null);
+    let wk1 = 0, wk2 = 0;
+    const PD_SIZE = 1 << 16;
+    const pdChk = new Int32Array(PD_SIZE);
+    const pdTag = new Int32Array(PD_SIZE);
+    const pdVal = new Int16Array(PD_SIZE);
 
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
     const setupBoard = (cols, rows) => {
       W = cols; H = rows; N = W * H; S = (W - 1) * (H - 1);
+      wk1 = 0; wk2 = 0;
       nbr = new Int16Array(N * 4).fill(-1);
       rowOf = new Int8Array(N);
       for (let r = 0; r < H; r++) {
@@ -335,6 +345,33 @@
       return tail;
     };
 
+    const distMaps = () => {
+      const idx = (wk1 >>> 0) & (DM_SIZE - 1);
+      const tag = W * 64 + H;
+      let e = dmMaps[idx];
+      if (dmChk[idx] === wk2 && dmTag[idx] === tag && e && e[0].length === N) return e;
+      if (!e || e[0].length !== N) { e = [new Int16Array(N), new Int16Array(N)]; dmMaps[idx] = e; }
+      bfsRow(goal[0], e[0]);
+      bfsRow(goal[1], e[1]);
+      dmChk[idx] = wk2;
+      dmTag[idx] = tag;
+      return e;
+    };
+
+    const pawnDist = (pl) => {
+      const at = pos[pl];
+      const idx = ((wk1 ^ ZP1[pl][at]) >>> 0) & (PD_SIZE - 1);
+      const chk = wk2 ^ ZP2[pl][at];
+      const tag = (W * 64 + H) * 2 + pl + 1;
+      if (pdChk[idx] === chk && pdTag[idx] === tag) return pdVal[idx];
+      bfsRow(goal[pl], scratchA, at);
+      const v = scratchA[at];
+      pdChk[idx] = chk;
+      pdTag[idx] = tag;
+      pdVal[idx] = v;
+      return v;
+    };
+
     const wallCells = (i) => {
       const r = (i / (W - 1)) | 0, c = i % (W - 1);
       return r * W + c;
@@ -342,6 +379,7 @@
 
     const setWall = (o, i, on) => {
       const a = wallCells(i);
+      if (o === 0) { wk1 ^= ZH1[i]; wk2 ^= ZH2[i]; } else { wk1 ^= ZV1[i]; wk2 ^= ZV2[i]; }
       if (o === 0) {
         if (on) { blk[a] |= 2; blk[a + 1] |= 2; blk[a + W] |= 1; blk[a + W + 1] |= 1; hw[i] = 1; }
         else { blk[a] &= ~2; blk[a + 1] &= ~2; blk[a + W] &= ~1; blk[a + W + 1] &= ~1; hw[i] = 0; }
@@ -394,11 +432,12 @@
       return -s;
     };
 
-    const genMoves = (ply, depth) => {
+    const genMoves = (ply, depth, staged) => {
       const p = turn, q = 1 - p;
       const [mMe, mOpp, mFrom] = mapsAt(ply);
-      bfsRow(goal[p], mMe);
-      bfsRow(goal[q], mOpp);
+      const dm = distMaps();
+      mMe.set(dm[p]);
+      mOpp.set(dm[q]);
       const dMe = mMe[pos[p]], dOpp = mOpp[pos[q]];
       const pm = [];
       const targets = pawnTargets(p);
@@ -410,90 +449,96 @@
       const forward = pm.filter((m) => mMe[m.i] < dMe);
       if (forward.length) pm.splice(0, pm.length, ...forward);
 
-      const wm = [];
-      if (left[p] > 0) {
-        cand.fill(0);
-        const nq = bfsCell(pos[q], mFrom);
-        for (let k = 0; k < nq; k++) { fc[queue[k]] = 0; bc[queue[k]] = 0; }
-        fc[pos[q]] = 1;
-        for (let k = 0; k < nq; k++) {
-          const cur = queue[k];
-          const f = fc[cur];
-          const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
-          for (let d = 0; d < 4; d++) {
-            if ((bk >> d) & 1) continue;
-            const nx = nbr[o4 + d];
-            if (nx >= 0 && mFrom[nx] === nd) fc[nx] += f;
-          }
-        }
-        for (let k = nq - 1; k >= 0; k--) {
-          const cur = queue[k];
-          if (mFrom[cur] + mOpp[cur] !== dOpp) continue;
-          if (mOpp[cur] === 0) { bc[cur] = 1; continue; }
-          let sum = 0;
-          const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
-          for (let d = 0; d < 4; d++) {
-            if ((bk >> d) & 1) continue;
-            const nx = nbr[o4 + d];
-            if (nx >= 0 && mFrom[nx] === nd && mOpp[nx] === mOpp[cur] - 1) {
-              sum += bc[nx];
-              if (d < 2) {
-                const cc = cur % W;
-                const rr = ((cur / W) | 0) - (d === 0 ? 1 : 0);
-                if (cc < W - 1) cand[rr * (W - 1) + cc] = 1;
-                if (cc > 0) cand[rr * (W - 1) + cc - 1] = 1;
-              } else {
-                const rr = (cur / W) | 0;
-                const cc = (cur % W) - (d === 2 ? 1 : 0);
-                if (rr < H - 1) cand[S + rr * (W - 1) + cc] = 1;
-                if (rr > 0) cand[S + (rr - 1) * (W - 1) + cc] = 1;
-              }
+      const buildWalls = () => {
+        const wm = [];
+        if (left[p] > 0) {
+          cand.fill(0);
+          const nq = bfsCell(pos[q], mFrom);
+          for (let k = 0; k < nq; k++) { fc[queue[k]] = 0; bc[queue[k]] = 0; }
+          fc[pos[q]] = 1;
+          for (let k = 0; k < nq; k++) {
+            const cur = queue[k];
+            const f = fc[cur];
+            const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
+            for (let d = 0; d < 4; d++) {
+              if ((bk >> d) & 1) continue;
+              const nx = nbr[o4 + d];
+              if (nx >= 0 && mFrom[nx] === nd) fc[nx] += f;
             }
           }
-          bc[cur] = sum;
-        }
-        const total = bc[pos[q]];
-        const through = (x, y) => {
-          if (mFrom[x] + 1 + mOpp[y] === dOpp) return fc[x] * bc[y];
-          if (mFrom[y] + 1 + mOpp[x] === dOpp) return fc[y] * bc[x];
-          return 0;
-        };
-        const cap = ply === 0 ? 24 : depth >= 4 ? 10 : depth === 3 ? 8 : 6;
-        for (let o = 0; o < 2; o++) {
-          for (let i = 0; i < S; i++) {
-            if (!cand[o * S + i] || !slotFree(o, i)) continue;
-            const a = wallCells(i);
-            let e1a, e1b, e2a, e2b;
-            if (o === 0) { e1a = a; e1b = a + W; e2a = a + 1; e2b = a + W + 1; }
-            else { e1a = a; e1b = a + 1; e2a = a + W; e2b = a + W + 1; }
-            if (through(e1a, e1b) + through(e2a, e2b) < total) continue;
-            setWall(o, i, true);
-            bfsRow(goal[q], scratchA, pos[q]);
-            const newOpp = scratchA[pos[q]];
-            let ok = newOpp > dOpp;
-            let newMe = dMe;
-            if (ok) {
-              const tight = Math.abs(mMe[e1a] - mMe[e1b]) === 1 || Math.abs(mMe[e2a] - mMe[e2b]) === 1;
-              if (tight) {
-                bfsRow(goal[p], scratchB, pos[p]);
-                newMe = scratchB[pos[p]];
-                if (newMe < 0) ok = false;
+          for (let k = nq - 1; k >= 0; k--) {
+            const cur = queue[k];
+            if (mFrom[cur] + mOpp[cur] !== dOpp) continue;
+            if (mOpp[cur] === 0) { bc[cur] = 1; continue; }
+            let sum = 0;
+            const bk = blk[cur], o4 = cur * 4, nd = mFrom[cur] + 1;
+            for (let d = 0; d < 4; d++) {
+              if ((bk >> d) & 1) continue;
+              const nx = nbr[o4 + d];
+              if (nx >= 0 && mFrom[nx] === nd && mOpp[nx] === mOpp[cur] - 1) {
+                sum += bc[nx];
+                if (d < 2) {
+                  const cc = cur % W;
+                  const rr = ((cur / W) | 0) - (d === 0 ? 1 : 0);
+                  if (cc < W - 1) cand[rr * (W - 1) + cc] = 1;
+                  if (cc > 0) cand[rr * (W - 1) + cc - 1] = 1;
+                } else {
+                  const rr = (cur / W) | 0;
+                  const cc = (cur % W) - (d === 2 ? 1 : 0);
+                  if (rr < H - 1) cand[S + rr * (W - 1) + cc] = 1;
+                  if (rr > 0) cand[S + (rr - 1) * (W - 1) + cc] = 1;
+                }
               }
             }
-            setWall(o, i, false);
-            if (!ok) continue;
-            const net = (newOpp - dOpp) - (newMe - dMe);
-            if (net < 1) continue;
-            wm.push({ t: 1, o, i, ord: net * 1000 + (newOpp - dOpp), win: false, ev: stat(newMe, newOpp, left[p] - 1, left[q]) });
+            bc[cur] = sum;
           }
+          const total = bc[pos[q]];
+          const through = (x, y) => {
+            if (mFrom[x] + 1 + mOpp[y] === dOpp) return fc[x] * bc[y];
+            if (mFrom[y] + 1 + mOpp[x] === dOpp) return fc[y] * bc[x];
+            return 0;
+          };
+          const cap = ply === 0 ? 24 : depth >= 4 ? 10 : depth === 3 ? 8 : 6;
+          for (let o = 0; o < 2; o++) {
+            for (let i = 0; i < S; i++) {
+              if (!cand[o * S + i] || !slotFree(o, i)) continue;
+              const a = wallCells(i);
+              let e1a, e1b, e2a, e2b;
+              if (o === 0) { e1a = a; e1b = a + W; e2a = a + 1; e2b = a + W + 1; }
+              else { e1a = a; e1b = a + 1; e2a = a + W; e2b = a + W + 1; }
+              if (through(e1a, e1b) + through(e2a, e2b) < total) continue;
+              setWall(o, i, true);
+              const newOpp = pawnDist(q);
+              let ok = newOpp > dOpp;
+              let newMe = dMe;
+              if (ok) {
+                const tight = Math.abs(mMe[e1a] - mMe[e1b]) === 1 || Math.abs(mMe[e2a] - mMe[e2b]) === 1;
+                if (tight) {
+                  newMe = pawnDist(p);
+                  if (newMe < 0) ok = false;
+                }
+              }
+              setWall(o, i, false);
+              if (!ok) continue;
+              const net = (newOpp - dOpp) - (newMe - dMe);
+              if (net < 1) continue;
+              wm.push({ t: 1, o, i, ord: net * 1000 + (newOpp - dOpp), win: false, ev: stat(newMe, newOpp, left[p] - 1, left[q]) });
+            }
+          }
+          wm.sort((a, b) => b.ord - a.ord);
+          if (wm.length > cap) wm.length = cap;
         }
-        wm.sort((a, b) => b.ord - a.ord);
-        if (wm.length > cap) wm.length = cap;
-      }
-      const list = [];
-      if (pm.length) list.push(pm[0]);
-      for (const w of wm) list.push(w);
-      for (let k = 1; k < pm.length; k++) list.push(pm[k]);
+        return wm;
+      };
+      const assemble = (wm) => {
+        const list = [];
+        if (pm.length) list.push(pm[0]);
+        for (const w of wm) list.push(w);
+        for (let k = 1; k < pm.length; k++) list.push(pm[k]);
+        return list;
+      };
+      if (staged) return { pm, full: () => assemble(buildWalls()) };
+      const list = assemble(buildWalls());
       if (ply === 0 && !bypass && (seen.size || avoid)) {
         const marks = list.map((m) => {
           if (m.win) return { again: false, bad: false };
@@ -592,17 +637,37 @@
         ttm = ttMove[idx];
       }
 
-      const moves = genMoves(ply, depth);
-      if (!moves.length) return -MATE;
-      if (ttm >= 0) {
-        const at = moves.findIndex((m) => codeOf(m) === ttm);
-        if (at > 0) { const [m] = moves.splice(at, 1); moves.unshift(m); }
+      let moves;
+      let lazy = null;
+      let lead = null;
+      if (ply > 0 && !(ttm >= N)) {
+        const g = genMoves(ply, depth, true);
+        if (g.pm.length) {
+          lead = g.pm[0];
+          if (ttm >= 0) {
+            const at = g.pm.findIndex((m) => m.i === ttm);
+            if (at > 0) lead = g.pm[at];
+          }
+          moves = [lead];
+          lazy = g;
+        } else {
+          moves = g.full();
+          if (!moves.length) return -MATE;
+        }
+      } else {
+        moves = genMoves(ply, depth);
+        if (!moves.length) return -MATE;
+        if (ttm >= 0) {
+          const at = moves.findIndex((m) => codeOf(m) === ttm);
+          if (at > 0) { const [m] = moves.splice(at, 1); moves.unshift(m); }
+        }
       }
 
       let best = -Infinity;
       let bestCode = -1;
       let first = true;
-      for (const m of moves) {
+      for (let mi = 0; mi < moves.length; mi++) {
+        const m = moves[mi];
         let s;
         if (m.win) s = MATE - ply;
         else if (depth === 1) s = m.ev;
@@ -624,6 +689,10 @@
         }
         if (best > alpha) alpha = best;
         if (alpha >= beta) break;
+        if (lazy && mi === 0) {
+          for (const x of lazy.full()) if (x !== lead) moves.push(x);
+          lazy = null;
+        }
       }
       ttChk[idx] = k2;
       ttScore[idx] = toTT(best, ply);
