@@ -30,6 +30,7 @@
   let busy = false;
   let session = null;
   let cycle = null;
+  let autoRematch = false;
   let quickAt = 0;
   let holdUntil = 0;
   let overSeen = false;
@@ -1058,7 +1059,7 @@
   };
 
   const rematchStep = () => {
-    if (!enabled) {
+    if (!autoRematch || !enabled) {
       cycle = null;
       quickAt = 0;
       return;
@@ -1129,6 +1130,7 @@
       cycle = null;
     }
     layout();
+    paintAuto();
     watchOver();
     const ctx = readState();
     if (ctx) {
@@ -1170,9 +1172,7 @@
     button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'NYALA' : 'MATI')
       + (played ? ` · ${wins}M ${losses}K` : '') + (compact ? '' : ' · ' + memoryLabel());
     button.style.background = enabled ? '#16a34a' : '#6b7280';
-    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Saat nyala: rematch otomatis, lalu Quick match '
-      + 'bila rematch tidak jalan; lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan untuk menghentikan siklus. '
-      + 'Pengalaman: ' + played
+    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
       + ' permainan, ' + avoidList().length + ' posisi kalah diingat, '
       + merged().records.length + ' rekaman posisi untuk pelatihan. '
       + (readUrl() ? 'Sumber memori: ' + readUrl() : 'Alamat GitHub belum diatur (tombol ☁).');
@@ -1262,23 +1262,55 @@
     paint();
     loadRemote();
   });
+  const autoButton = document.createElement('button');
+  autoButton.style.cssText = buttonStyle;
+  autoButton.title = 'Bekerja hanya bila Bot juga nyala. Rematch otomatis saat permainan berakhir; bila '
+    + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
+    + 'dijalankan. Lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan tombol ini kapan saja '
+    + 'untuk menghentikan siklus (Alt+R)';
+  const autoLabel = () => {
+    if (!autoRematch) return '↻ Ulang: MATI';
+    if (!enabled) return '↻ Ulang: NYALA (Bot mati)';
+    if (!cycle) return '↻ Ulang: NYALA';
+    if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
+    if (cycle.phase === 'rematch') {
+      const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
+      return '↻ Ulang: tunggu ' + left + ' dtk';
+    }
+    return '↻ Ulang: Quick match...';
+  };
+  const paintAuto = () => {
+    const text = autoLabel();
+    if (autoButton.textContent !== text) autoButton.textContent = text;
+    autoButton.style.background = autoRematch ? '#2563eb' : '#6b7280';
+  };
+  const toggleAuto = () => {
+    autoRematch = !autoRematch;
+    cycle = null;
+    paintAuto();
+  };
+  autoButton.addEventListener('click', toggleAuto);
   const layout = () => {
     const inGame = document.documentElement.classList.contains('in-game');
     if (inGame === compact) return;
     compact = inGame;
     box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
     for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
-    button.style.fontSize = compact ? '12px' : '13px';
-    button.style.padding = compact ? '5px 8px' : '6px 10px';
+    for (const b of [button, autoButton]) {
+      b.style.fontSize = compact ? '12px' : '13px';
+      b.style.padding = compact ? '5px 8px' : '6px 10px';
+    }
     paint();
   };
   document.addEventListener('keydown', (e) => {
     if (!e.altKey) return;
     const key = String(e.key || '').toLowerCase();
     if (key === 'b') { e.preventDefault(); toggle(); }
+    if (key === 'r') { e.preventDefault(); toggleAuto(); }
   });
   paint();
-  box.append(button, exportButton, importButton, urlButton, reset, picker);
+  paintAuto();
+  box.append(button, autoButton, exportButton, importButton, urlButton, reset, picker);
   ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
