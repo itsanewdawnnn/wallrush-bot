@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.5';
+  const VERSION = '4.6';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -209,6 +209,8 @@
     const TIME_STABLE_CUT = 0.5;
     const TIME_UNSTABLE_CUT = 0.55;
     const TIME_DROP = 40;
+    const OPENING_RUN = 6;
+    const OPENING_DIST = 6;
     const DEFAULT_WEIGHTS = [58.2, 27.9, 93.6, -5.5, -5, 5.8, -7.5, 231.8, -153.2];
     const EW = DEFAULT_WEIGHTS;
     let avoid = null;
@@ -761,6 +763,8 @@
       let reached = 0;
       let prevCode = -1;
       let prevScore = 0;
+      let run = 0;
+      const opening = state.mode !== 'race' && state.walls.length === 0 && distMaps()[turn][pos[turn]] >= OPENING_DIST;
       for (let depth = 1; depth <= (opts.maxDepth || 40); depth++) {
         rootMove = null;
         const score = negamax(depth, -Infinity, Infinity, 0);
@@ -772,11 +776,13 @@
         reached = depth;
         if (Math.abs(score) > MATE - 1000) break;
         const code = codeOf(best);
+        run = code === prevCode ? run + 1 : 0;
         const unstable = depth >= 3 && (code !== prevCode || score < prevScore - TIME_DROP);
         prevCode = code;
         prevScore = score;
         const limit = unstable ? TIME_UNSTABLE_CUT * budget * TIME_EXT : TIME_STABLE_CUT * budget;
         if (now() - start > limit) break;
+        if (opening && run >= OPENING_RUN) deadline = Math.min(deadline, start + TIME_STABLE_CUT * budget);
       }
       chooseMove.last = { depth: reached, nodes, ms: Math.round(now() - start) };
       if (!best) return null;
