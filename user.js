@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.6';
+  const VERSION = '4.7';
   const BUDGET_MS = 6000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 20;
@@ -165,12 +165,12 @@
     return { avoid: all.lost, shield: all.won };
   };
   const memoryLabel = () => {
-    if (remoteState === 'lokal') return 'memori lokal';
-    if (remoteState === 'memuat') return 'memori memuat';
-    if (remoteState === 'gagal') return 'memori GitHub gagal';
+    if (remoteState === 'lokal') return 'lokal';
+    if (remoteState === 'memuat') return 'memuat';
+    if (remoteState === 'gagal') return 'GitHub gagal';
     const known = new Set(remote.games.map((g) => g[0]));
     const fresh = memory.games.filter((g) => !known.has(g[0])).length;
-    return 'memori ' + remoteVersion + (fresh ? ' +' + fresh : '');
+    return remoteVersion + (fresh ? ' + ' + fresh : '');
   };
   const loadRemote = async () => {
     const url = readUrl();
@@ -766,7 +766,15 @@
       let prevScore = 0;
       let run = 0;
       const opening = state.mode !== 'race' && state.walls.length === 0 && distMaps()[turn][pos[turn]] >= OPENING_DIST;
-      for (let depth = 1; depth <= (opts.maxDepth || 40); depth++) {
+      let instant = false;
+      if (opening && !opts.maxDepth) {
+        const list = genMoves(0, 1);
+        if (list.length && list[0].t === 0 && !list[0].win) {
+          best = list[0];
+          instant = true;
+        }
+      }
+      for (let depth = 1; !instant && depth <= (opts.maxDepth || 40); depth++) {
         rootMove = null;
         const score = negamax(depth, -Infinity, Infinity, 0);
         if (timedOut) {
@@ -1169,10 +1177,9 @@
   const paint = () => {
     const { wins, losses } = record();
     const played = wins + losses;
-    button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'NYALA' : 'MATI')
-      + (played ? ` · ${wins}M ${losses}K` : '') + (compact ? '' : ' · ' + memoryLabel());
+    button.textContent = 'Bot v' + VERSION + ': ' + (enabled ? 'ON' : 'OFF') + (compact ? '' : ' - ' + memoryLabel());
     button.style.background = enabled ? '#16a34a' : '#6b7280';
-    button.title = 'Bot v' + VERSION + '. Nyalakan atau matikan (Alt+B). Pengalaman: ' + played
+    button.title = 'Bot v' + VERSION + '. Klik untuk ON atau OFF. Pengalaman: ' + played
       + ' permainan, ' + avoidList().length + ' posisi kalah diingat, '
       + merged().records.length + ' rekaman posisi untuk pelatihan. '
       + (readUrl() ? 'Sumber memori: ' + readUrl() : 'Alamat GitHub belum diatur (tombol ☁).');
@@ -1202,44 +1209,11 @@
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     alert('Memori diekspor. Versi: ' + versi);
   };
-  const mergeMemory = (data) => {
-    const incoming = normalize(data);
-    if (!incoming) return false;
-    memory.games = [...new Map([...memory.games, ...incoming.games])].slice(-GAME_CAP);
-    memory.records = [...new Map([...memory.records, ...incoming.records].map((r) => [r[0], r])).values()]
-      .slice(-RECORD_CAP);
-    remember('lost', incoming.lost);
-    remember('won', incoming.won);
-    saveMemory();
-    paint();
-    return true;
-  };
-  const picker = document.createElement('input');
-  picker.type = 'file';
-  picker.accept = 'application/json,.json';
-  picker.style.display = 'none';
-  picker.addEventListener('change', async () => {
-    const file = picker.files[0];
-    picker.value = '';
-    if (!file) return;
-    let ok = false;
-    try {
-      ok = mergeMemory(JSON.parse(await file.text()));
-    } catch (e) {
-      ok = false;
-    }
-    alert(ok ? 'Pengalaman bot berhasil digabungkan.' : 'Berkas tidak valid.');
-  });
   const exportButton = document.createElement('button');
   exportButton.style.cssText = buttonStyle;
   exportButton.textContent = '⇩';
   exportButton.title = 'Ekspor pengalaman bot ke berkas JSON';
   exportButton.addEventListener('click', exportMemory);
-  const importButton = document.createElement('button');
-  importButton.style.cssText = buttonStyle;
-  importButton.textContent = '⇧';
-  importButton.title = 'Impor pengalaman bot dari berkas JSON';
-  importButton.addEventListener('click', () => picker.click());
   const urlButton = document.createElement('button');
   urlButton.style.cssText = buttonStyle;
   urlButton.textContent = '☁';
@@ -1264,14 +1238,14 @@
   });
   const autoButton = document.createElement('button');
   autoButton.style.cssText = buttonStyle;
-  autoButton.title = 'Bekerja hanya bila Bot juga nyala. Rematch otomatis saat permainan berakhir; bila '
+  autoButton.title = 'Bekerja hanya bila Bot juga ON. Rematch otomatis saat permainan berakhir; bila '
     + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
     + 'dijalankan. Lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan tombol ini kapan saja '
-    + 'untuk menghentikan siklus (Alt+R)';
+    + 'untuk menghentikan siklus.';
   const autoLabel = () => {
-    if (!autoRematch) return '↻ Ulang: MATI';
-    if (!enabled) return '↻ Ulang: NYALA (Bot mati)';
-    if (!cycle) return '↻ Ulang: NYALA';
+    if (!autoRematch) return '↻ Ulang: OFF';
+    if (!enabled) return '↻ Ulang: ON (Bot OFF)';
+    if (!cycle) return '↻ Ulang: ON';
     if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
     if (cycle.phase === 'rematch') {
       const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
@@ -1295,22 +1269,16 @@
     if (inGame === compact) return;
     compact = inGame;
     box.style.cssText = compact ? BOX_COMPACT_STYLE : BOX_STYLE;
-    for (const b of [exportButton, importButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
+    for (const b of [exportButton, urlButton, reset]) b.style.display = compact ? 'none' : '';
     for (const b of [button, autoButton]) {
       b.style.fontSize = compact ? '12px' : '13px';
       b.style.padding = compact ? '5px 8px' : '6px 10px';
     }
     paint();
   };
-  document.addEventListener('keydown', (e) => {
-    if (!e.altKey) return;
-    const key = String(e.key || '').toLowerCase();
-    if (key === 'b') { e.preventDefault(); toggle(); }
-    if (key === 'r') { e.preventDefault(); toggleAuto(); }
-  });
   paint();
   paintAuto();
-  box.append(button, autoButton, exportButton, importButton, urlButton, reset, picker);
+  box.append(button, autoButton, exportButton, urlButton, reset);
   ($('app') || document.body).appendChild(box);
   setInterval(step, POLL_MS);
   loadRemote();
