@@ -1,8 +1,8 @@
 (() => {
-  const VERSION = '4.7';
-  const BUDGET_MS = 6000;
+  const VERSION = '4.8';
+  const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
-  const BANK_MOVES = 20;
+  const BANK_MOVES = 14;
   const PONDER_MS = 20000;
   const POLL_MS = 400;
   const COOLDOWN_MS = 1500;
@@ -244,6 +244,12 @@
     let turn = 0;
     let k1 = 0, k2 = 0;
     let queue = new Int16Array(81);
+    let vis = new Int32Array(81);
+    let gdist = new Int16Array(81);
+    let entNode = new Int16Array(324);
+    let entNext = new Int16Array(324);
+    const bucketHead = new Int16Array(256);
+    let stamp = 0;
     let nodes = 0, deadline = 0, timedOut = false;
     let rootMove = null;
     const seen = new Set();
@@ -283,6 +289,11 @@
       hw = new Uint8Array(S);
       vw = new Uint8Array(S);
       queue = new Int16Array(N);
+      vis = new Int32Array(N);
+      gdist = new Int16Array(N);
+      entNode = new Int16Array(N * 4);
+      entNext = new Int16Array(N * 4);
+      stamp = 0;
       maps = [];
       scratchA = new Int16Array(N);
       scratchB = new Int16Array(N);
@@ -361,14 +372,55 @@
       return e;
     };
 
-    const pawnDist = (pl) => {
+    const boundedDist = (pl, h) => {
+      const at = pos[pl];
+      const base = h[at];
+      stamp++;
+      let used = 0;
+      let top = 0;
+      bucketHead.fill(-1, 0, 256);
+      vis[at] = stamp;
+      gdist[at] = 0;
+      entNode[used] = at;
+      entNext[used] = -1;
+      bucketHead[0] = used++;
+      for (let f = 0; f <= top && f < 256; f++) {
+        while (bucketHead[f] >= 0) {
+          const e = bucketHead[f];
+          bucketHead[f] = entNext[e];
+          const cur = entNode[e];
+          const g = gdist[cur];
+          if (g + h[cur] - base !== f) continue;
+          if (h[cur] === 0) return g;
+          const g1 = g + 1;
+          const b = blk[cur];
+          const o = cur * 4;
+          for (let d = 0; d < 4; d++) {
+            if ((b >> d) & 1) continue;
+            const nx = nbr[o + d];
+            if (nx < 0) continue;
+            if (vis[nx] === stamp && gdist[nx] <= g1) continue;
+            vis[nx] = stamp;
+            gdist[nx] = g1;
+            const nf = g1 + h[nx] - base;
+            if (nf >= 256) continue;
+            entNode[used] = nx;
+            entNext[used] = bucketHead[nf];
+            bucketHead[nf] = used++;
+            if (nf > top) top = nf;
+          }
+        }
+      }
+      return -1;
+    };
+
+    const pawnDist = (pl, h) => {
       const at = pos[pl];
       const idx = ((wk1 ^ ZP1[pl][at]) >>> 0) & (PD_SIZE - 1);
       const chk = wk2 ^ ZP2[pl][at];
       const tag = (W * 64 + H) * 2 + pl + 1;
       if (pdChk[idx] === chk && pdTag[idx] === tag) return pdVal[idx];
-      bfsRow(goal[pl], scratchA, at);
-      const v = scratchA[at];
+      const v = boundedDist(pl, h);
       pdChk[idx] = chk;
       pdTag[idx] = tag;
       pdVal[idx] = v;
@@ -511,13 +563,13 @@
               else { e1a = a; e1b = a + 1; e2a = a + W; e2b = a + W + 1; }
               if (through(e1a, e1b) + through(e2a, e2b) < total) continue;
               setWall(o, i, true);
-              const newOpp = pawnDist(q);
+              const newOpp = pawnDist(q, mOpp);
               let ok = newOpp > dOpp;
               let newMe = dMe;
               if (ok) {
                 const tight = Math.abs(mMe[e1a] - mMe[e1b]) === 1 || Math.abs(mMe[e2a] - mMe[e2b]) === 1;
                 if (tight) {
-                  newMe = pawnDist(p);
+                  newMe = pawnDist(p, mMe);
                   if (newMe < 0) ok = false;
                 }
               }
