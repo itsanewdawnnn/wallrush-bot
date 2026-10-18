@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.8';
+  const VERSION = '4.9';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -12,9 +12,15 @@
   const QUICK_RETRY_MS = 20000;
   const FALLBACK_BUDGET_MS = 1500;
   const WORKER_FAILS = 3;
-  const WORKER_GRACE_MS = 4000;
+  const WORKER_GRACE_MS = 1500;
+  const MOVE_LIMIT_MS = 29000;
+  const MOVE_SAFETY_MS = 3000;
+  const MIN_THINK_MS = 400;
   const MIN_RECORD_PLIES = 6;
   const LOST_SKIP_MOVES = 2;
+  const BLAME_MOVES = 3;
+  const BLAME_SCORE = 150;
+  const MEMORY_MOVES = 15;
   const STORE_KEY = 'wallrushBot.memory.v1';
   const URL_KEY = 'wallrushBot.memoryUrl';
   const OPPONENTS_KEY = 'wallrushBot.opponents';
@@ -28,6 +34,8 @@
   const $ = (id) => document.getElementById(id);
   let enabled = false;
   let busy = false;
+  let turnSince = 0;
+  let turnMove = null;
   let session = null;
   let cycle = null;
   let autoRematch = false;
@@ -811,9 +819,10 @@
       nodes = 0; timedOut = false;
       const budget = opts.budgetMs || 1500;
       const start = now();
-      deadline = start + budget * TIME_EXT;
+      deadline = start + Math.min(budget * TIME_EXT, opts.limitMs || Infinity);
       let best = null;
       let reached = 0;
+      let lastScore = 0;
       let prevCode = -1;
       let prevScore = 0;
       let run = 0;
@@ -835,6 +844,7 @@
         }
         best = rootMove;
         reached = depth;
+        lastScore = score;
         if (Math.abs(score) > MATE - 1000) break;
         const code = codeOf(best);
         run = code === prevCode ? run + 1 : 0;
@@ -851,9 +861,9 @@
       seen.add(k1);
       const key = k1;
       unmake(best);
-      if (best.t === 0) return { type: 'pawn', r: rowOf[best.i], c: best.i % W, key };
+      if (best.t === 0) return { type: 'pawn', r: rowOf[best.i], c: best.i % W, key, score: lastScore };
       const r = (best.i / (W - 1)) | 0, c = best.i % (W - 1);
-      return { type: 'wall', o: best.o === 0 ? 'h' : 'v', r, c, key };
+      return { type: 'wall', o: best.o === 0 ? 'h' : 'v', r, c, key, score: lastScore };
     };
 
     return { chooseMove, ponder };
@@ -865,7 +875,7 @@
     + 'if(m.ponder){const t0=Date.now();const run=()=>{'
     + 'if(id!==job||Date.now()-t0>' + PONDER_MS + ')return;'
     + 'engine.ponder(m.state,{budgetMs:100});setTimeout(run,0);};run();return;}'
-    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,avoid:m.avoid,shield:m.shield}));};';
+    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,limitMs:m.limitMs,avoid:m.avoid,shield:m.shield}));};';
   let worker = null;
   let mainEngine = null;
   let pending = null;
@@ -891,7 +901,7 @@
     return worker;
   };
 
-  const viaWorker = (state, budgetMs) => new Promise((resolve, reject) => {
+  const viaWorker = (state, budgetMs, limitMs) => new Promise((resolve, reject) => {
     const w = makeWorker();
     const timer = setTimeout(() => {
       pending = null;
@@ -900,12 +910,12 @@
       ponderSig = '';
       workerFails++;
       reject(new Error('waktu habis'));
-    }, budgetMs * 2 + WORKER_GRACE_MS);
+    }, Math.min(budgetMs * 2, limitMs) + WORKER_GRACE_MS);
     pending = {
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (error) => { clearTimeout(timer); reject(error); },
     };
-    w.postMessage({ state, budgetMs, ...knowledge() });
+    w.postMessage({ state, budgetMs, limitMs, ...knowledge() });
   });
 
   const budgetNow = () => {
@@ -915,13 +925,15 @@
   };
 
   const think = async (state) => {
-    const budgetMs = budgetNow();
+    const room = MOVE_LIMIT_MS - MOVE_SAFETY_MS - (Date.now() - turnSince);
+    const budgetMs = Math.min(budgetNow(), room);
     try {
-      if (workerFails >= WORKER_FAILS) throw new Error('worker dimatikan');
-      return await viaWorker(state, budgetMs);
+      if (workerFails >= WORKER_FAILS || room < MIN_THINK_MS) throw new Error('worker dimatikan');
+      return await viaWorker(state, budgetMs, room);
     } catch {
       if (!mainEngine) mainEngine = engineMain();
-      return mainEngine.chooseMove(state, { budgetMs: Math.min(budgetMs, FALLBACK_BUDGET_MS), ...knowledge() });
+      const quickMs = Math.max(100, Math.min(budgetMs, FALLBACK_BUDGET_MS));
+      return mainEngine.chooseMove(state, { budgetMs: quickMs, limitMs: Math.max(250, Math.min(room, quickMs * 2)), ...knowledge() });
     }
   };
 
@@ -1039,7 +1051,7 @@
     }
   };
 
-  const newSession = (state) => ({ keys: [], walls: state.walls.length, positions: [], last: '' });
+  const newSession = (state) => ({ keys: [], scores: [], walls: state.walls.length, positions: [], last: '' });
 
   const outcome = (ctx) => {
     const { state } = ctx;
@@ -1052,6 +1064,11 @@
       return { winner: tag.className === 'win' ? ctx.me : 1 - ctx.me, ending: 1 };
     }
     return null;
+  };
+
+  const blamedKeys = (s) => {
+    const at = s.scores.findIndex((v) => v <= -BLAME_SCORE);
+    return at < 0 ? [] : s.keys.slice(Math.max(LOST_SKIP_MOVES, at - BLAME_MOVES), Math.min(at, MEMORY_MOVES));
   };
 
   const settle = (ctx) => {
@@ -1074,7 +1091,7 @@
       const won = result.winner === ctx.me;
       const id = newId();
       const wallInts = state.walls.map((w) => w.r * 100 + w.c * 10 + (w.o === 'v' ? 1 : 0));
-      remember(won ? 'won' : 'lost', won ? session.keys : session.keys.slice(LOST_SKIP_MOVES));
+      remember(won ? 'won' : 'lost', won ? session.keys.slice(0, MEMORY_MOVES) : blamedKeys(session));
       memory.games = [...memory.games, [id, won ? 1 : 0]].slice(-GAME_CAP);
       memory.records = [...memory.records,
         [id, state.mode === 'race' ? 1 : 0, result.winner, wallInts, session.positions, result.ending]]
@@ -1197,18 +1214,30 @@
       settle(ctx);
       observe(ctx);
     }
-    if (enabled && ctx && ctx.state.turn !== null && ctx.state.turn !== ctx.me) ponderOn(ctx.state);
+    if (ctx && ctx.state.turn === ctx.me) {
+      if (!turnSince) turnSince = Date.now();
+    } else {
+      turnSince = 0;
+      turnMove = null;
+    }
+    if (ctx && ctx.state.turn !== null && (!enabled || ctx.state.turn !== ctx.me)) ponderOn(ctx.state);
     else ponderOff();
     if (!enabled || busy) return;
     if (!ctx || ctx.state.turn !== ctx.me) return;
     busy = true;
     try {
-      const move = await think(ctx.state);
+      const key = positionKey(ctx.state);
+      const fresh = !turnMove || turnMove.key !== key;
+      const move = fresh ? await think(ctx.state) : turnMove.move;
       const now = readState();
-      if (enabled && move && now && now.state.turn === now.me && positionKey(now.state) === positionKey(ctx.state)) {
+      if (enabled && move && now && now.state.turn === now.me && positionKey(now.state) === key) {
         play(now, move);
-        if (!session) session = newSession(now.state);
-        session.keys.push(move.key);
+        if (fresh) {
+          turnMove = { key, move };
+          if (!session) session = newSession(now.state);
+          session.keys.push(move.key);
+          session.scores.push(move.score);
+        }
       }
     } finally {
       setTimeout(() => { busy = false; }, COOLDOWN_MS);
