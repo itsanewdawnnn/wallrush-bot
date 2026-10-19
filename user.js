@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '5.0';
+  const VERSION = '5.1';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -16,6 +16,8 @@
   const MOVE_LIMIT_MS = 29000;
   const MOVE_SAFETY_MS = 3000;
   const MIN_THINK_MS = 400;
+  const RETRY_PLAYS = 3;
+  const BANNER_SETTLE_MS = 300;
   const MIN_RECORD_PLIES = 6;
   const LOST_SKIP_MOVES = 2;
   const BLAME_MOVES = 3;
@@ -33,8 +35,10 @@
   const RECORD_CAP = 300;
   const $ = (id) => document.getElementById(id);
   let enabled = false;
-  let busy = false;
-  let turnSince = 0;
+  let busyUntil = 0;
+  let stepAt = 0;
+  let turnSeen = 0;
+  let turnEnd = 0;
   let turnMove = null;
   let session = null;
   let cycle = null;
@@ -497,6 +501,94 @@
       return -s;
     };
 
+    let attack = false;
+    let atkK1 = 0, atkK2 = 0, atkList = [];
+
+    const pathMaps = () => {
+      const dm = distMaps();
+      const g0 = Int16Array.from(dm[0]), g1 = Int16Array.from(dm[1]);
+      const f0 = new Int16Array(N), f1 = new Int16Array(N);
+      bfsCell(pos[0], f0);
+      bfsCell(pos[1], f1);
+      return { g: [g0, g1], f: [f0, f1], d: [g0[pos[0]], g1[pos[1]]] };
+    };
+
+    const wallEdges = (o, i) => {
+      const a = wallCells(i);
+      return o === 0 ? [a, a + W, a + 1, a + W + 1] : [a, a + 1, a + W, a + W + 1];
+    };
+
+    const cuts = (pm, pl, o, i) => {
+      const e = wallEdges(o, i), f = pm.f[pl], g = pm.g[pl], d = pm.d[pl];
+      for (let k = 0; k < 4; k += 2) {
+        const x = e[k], y = e[k + 1];
+        if (f[x] < 0 || f[y] < 0) continue;
+        if (f[x] + 1 + g[y] === d || f[y] + 1 + g[x] === d) return true;
+      }
+      return false;
+    };
+
+    const bestNet = (pm, pl) => {
+      if (left[pl] <= 0) return 0;
+      const vic = 1 - pl;
+      let best = -Infinity;
+      for (let o = 0; o < 2; o++) {
+        for (let i = 0; i < S; i++) {
+          if (!slotFree(o, i) || !cuts(pm, vic, o, i)) continue;
+          setWall(o, i, true);
+          const dv = pawnDist(vic, pm.g[vic]);
+          let ds = pm.d[pl];
+          if (dv >= 0) ds = pawnDist(pl, pm.g[pl]);
+          setWall(o, i, false);
+          if (dv < 0 || ds < 0 || dv <= pm.d[vic]) continue;
+          const net = (dv - pm.d[vic]) - (ds - pm.d[pl]);
+          if (net > best) best = net;
+        }
+      }
+      return best === -Infinity ? 0 : best;
+    };
+
+    const attackWalls = (dMe, dOpp) => {
+      if (atkK1 !== k1 || atkK2 !== k2) {
+        atkK1 = k1; atkK2 = k2;
+        const p = turn, q = 1 - p;
+        const pm0 = pathMaps();
+        const defBefore = left[q] > 0 ? bestNet(pm0, q) : 0;
+        const found = [];
+        for (let o = 0; o < 2; o++) {
+          for (let i = 0; i < S; i++) {
+            if (!slotFree(o, i)) continue;
+            const a = wallCells(i);
+            let lv = Infinity;
+            for (const c of [a, a + 1, a + W, a + W + 1]) {
+              for (let pl = 0; pl < 2; pl++) {
+                if (pm0.f[pl][c] < 0) continue;
+                const ex = pm0.f[pl][c] + pm0.g[pl][c] - pm0.d[pl];
+                if (ex < lv) lv = ex;
+              }
+            }
+            if (lv > 2) continue;
+            setWall(o, i, true);
+            const newOpp = pawnDist(q, pm0.g[q]);
+            const newMe = newOpp >= 0 ? pawnDist(p, pm0.g[p]) : -1;
+            if (newOpp < 0 || newMe < 0) { setWall(o, i, false); continue; }
+            const net = (newOpp - dOpp) - (newMe - dMe);
+            if (net > 0) { setWall(o, i, false); continue; }
+            left[p]--;
+            const pm1 = pathMaps();
+            const two = net + bestNet(pm1, p);
+            const def = left[q] > 0 ? defBefore - bestNet(pm1, q) : 0;
+            left[p]++;
+            setWall(o, i, false);
+            found.push({ o, i, rank: (two + def) * 100 - lv, ev: stat(newMe, newOpp, left[p] - 1, left[q]) });
+          }
+        }
+        found.sort((x, y) => y.rank - x.rank);
+        atkList = found.slice(0, 6);
+      }
+      return atkList.map((x) => ({ t: 1, o: x.o, i: x.i, ord: 0, win: false, ev: x.ev }));
+    };
+
     const genMoves = (ply, depth, staged) => {
       const p = turn, q = 1 - p;
       const [mMe, mOpp, mFrom] = mapsAt(ply);
@@ -592,6 +684,7 @@
           }
           wm.sort((a, b) => b.ord - a.ord);
           if (wm.length > cap) wm.length = cap;
+          if (ply === 0 && attack) for (const x of attackWalls(dMe, dOpp)) wm.push(x);
         }
         return wm;
       };
@@ -830,6 +923,7 @@
       let run = 0;
       const opening = state.mode !== 'race' && state.walls.length === 0 && distMaps()[turn][pos[turn]] >= OPENING_DIST;
       let instant = false;
+      attack = true;
       if (opening && !opts.maxDepth) {
         const list = genMoves(0, 1);
         if (list.length && list[0].t === 0 && !list[0].win) {
@@ -857,6 +951,7 @@
         if (now() - start > limit) break;
         if (opening && run >= OPENING_RUN) deadline = Math.min(deadline, start + TIME_STABLE_CUT * budget);
       }
+      attack = false;
       chooseMove.last = { depth: reached, nodes, ms: Math.round(now() - start) };
       if (!best) return null;
       make(best);
@@ -905,17 +1000,18 @@
 
   const viaWorker = (state, budgetMs, limitMs) => new Promise((resolve, reject) => {
     const w = makeWorker();
-    const timer = setTimeout(() => {
-      pending = null;
-      w.terminate();
-      worker = null;
-      ponderSig = '';
-      workerFails++;
-      reject(new Error('waktu habis'));
-    }, Math.min(budgetMs * 2, limitMs) + WORKER_GRACE_MS);
     pending = {
-      resolve: (value) => { clearTimeout(timer); resolve(value); },
-      reject: (error) => { clearTimeout(timer); reject(error); },
+      resolve,
+      reject,
+      expires: Date.now() + Math.min(budgetMs * 2, limitMs) + WORKER_GRACE_MS,
+      expire: () => {
+        pending = null;
+        w.terminate();
+        worker = null;
+        ponderSig = '';
+        workerFails++;
+        reject(new Error('waktu habis'));
+      },
     };
     w.postMessage({ state, budgetMs, limitMs, ...knowledge() });
   });
@@ -926,16 +1022,23 @@
     return Math.max(MIN_BUDGET_MS, Math.min(BUDGET_MS, bank / BANK_MOVES));
   };
 
-  const think = async (state) => {
-    const room = MOVE_LIMIT_MS - MOVE_SAFETY_MS - (Date.now() - turnSince);
-    const budgetMs = Math.min(budgetNow(), room);
+  const moveLeftMs = () => {
+    const m = document.hidden ? null : /(\d+)s\s*$/.exec(($('turn-banner') || {}).textContent || '');
+    return m ? Math.max(0, (+m[1] - 1) * 1000) : MOVE_LIMIT_MS;
+  };
+
+  const think = async (state, retry) => {
+    turnEnd = Math.min(turnEnd, Date.now() + moveLeftMs());
+    const room = turnEnd - Date.now() - MOVE_SAFETY_MS;
+    const budgetMs = Math.min(budgetNow(), room, retry ? FALLBACK_BUDGET_MS : Infinity);
     try {
       if (workerFails >= WORKER_FAILS || room < MIN_THINK_MS) throw new Error('worker dimatikan');
       return await viaWorker(state, budgetMs, room);
     } catch {
       if (!mainEngine) mainEngine = engineMain();
       const quickMs = Math.max(100, Math.min(budgetMs, FALLBACK_BUDGET_MS));
-      return mainEngine.chooseMove(state, { budgetMs: quickMs, limitMs: Math.max(250, Math.min(room, quickMs * 2)), ...knowledge() });
+      const left = turnEnd - Date.now() - MOVE_SAFETY_MS;
+      return mainEngine.chooseMove(state, { budgetMs: quickMs, limitMs: Math.max(250, Math.min(left, quickMs * 2)), ...knowledge() });
     }
   };
 
@@ -1227,6 +1330,7 @@
   };
 
   const step = async () => {
+    if (pending && Date.now() > pending.expires) pending.expire();
     try {
       rematchStep();
     } catch (e) {
@@ -1241,32 +1345,44 @@
       observe(ctx);
     }
     if (ctx && ctx.state.turn === ctx.me) {
-      if (!turnSince) turnSince = Date.now();
+      if (!turnEnd) {
+        turnSeen = Date.now();
+        turnEnd = turnSeen + MOVE_LIMIT_MS;
+      }
     } else {
-      turnSince = 0;
+      turnEnd = 0;
       turnMove = null;
     }
     if (ctx && ctx.state.turn !== null && (!enabled || ctx.state.turn !== ctx.me)) ponderOn(ctx.state);
     else ponderOff();
-    if (!enabled || busy) return;
+    if (!enabled || Date.now() < busyUntil) return;
     if (!ctx || ctx.state.turn !== ctx.me) return;
-    busy = true;
+    if (Date.now() - turnSeen < BANNER_SETTLE_MS) return;
+    busyUntil = Infinity;
     try {
       const key = positionKey(ctx.state);
-      const fresh = !turnMove || turnMove.key !== key;
-      const move = fresh ? await think(ctx.state) : turnMove.move;
+      const same = Boolean(turnMove) && turnMove.key === key;
+      const stale = same && turnMove.plays >= RETRY_PLAYS;
+      const fresh = !same || stale;
+      const move = fresh ? await think(ctx.state, stale) : turnMove.move;
       const now = readState();
       if (enabled && move && now && now.state.turn === now.me && positionKey(now.state) === key) {
         play(now, move);
         if (fresh) {
-          turnMove = { key, move };
+          if (stale && session && session.keys.length) {
+            session.keys.pop();
+            session.scores.pop();
+          }
+          turnMove = { key, move, plays: 1 };
           if (!session) session = newSession(now.state);
           session.keys.push(move.key);
           session.scores.push(move.score);
+        } else {
+          turnMove.plays++;
         }
       }
     } finally {
-      setTimeout(() => { busy = false; }, COOLDOWN_MS);
+      busyUntil = Date.now() + COOLDOWN_MS;
     }
   };
 
@@ -1388,6 +1504,17 @@
   paintAuto();
   box.append(button, autoButton, exportButton, urlButton, reset);
   ($('app') || document.body).appendChild(box);
-  setInterval(step, POLL_MS);
   loadRemote();
+  const tick = () => {
+    const t = Date.now();
+    if (t - stepAt < POLL_MS / 2) return;
+    stepAt = t;
+    step();
+  };
+  setInterval(tick, POLL_MS);
+  try {
+    new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),' + POLL_MS + ')'], { type: 'text/javascript' }))).onmessage = tick;
+  } catch (e) {
+    return;
+  }
 })();
