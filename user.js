@@ -26,7 +26,7 @@
   const OPPONENTS_KEY = 'wallrushBot.opponents';
   const OPPONENTS_CAP = 200;
   const SELF_PAUSE_MIN_MS = 5000;
-  const SELF_PAUSE_MAX_MS = 15000;
+  const SELF_PAUSE_MAX_MS = 10000;
   const URL_PREFIX = 'https://raw.githubusercontent.com/';
   const MEMORY_CAP = 12000;
   const GAME_CAP = 5000;
@@ -41,6 +41,8 @@
   let autoRematch = false;
   let quickAt = 0;
   let holdUntil = 0;
+  let selfAt = 0;
+  let resignAt = 0;
   let overSeen = false;
   let workerFails = 0;
 
@@ -1135,15 +1137,38 @@
     quickAt = now;
   };
 
+  const opponentGone = () => {
+    const ctx = readState();
+    const result = ctx && outcome(ctx);
+    return Boolean(result && result.ending === 1 && result.winner === ctx.me);
+  };
+
+  const resignSelf = (now) => {
+    const yes = $('btn-resign-yes');
+    if (shown(yes)) {
+      yes.click();
+    } else if (now - resignAt >= REMATCH_DELAY_MS) {
+      resignAt = now;
+      $('btn-resign').click();
+    }
+  };
+
   const rematchStep = () => {
     if (!autoRematch || !enabled) {
       cycle = null;
       quickAt = 0;
+      selfAt = 0;
       return;
     }
     const overlay = $('overlay-gameover');
     const over = Boolean(overlay && !overlay.hidden);
     const now = Date.now();
+    if (!over && isSelfMatch() && shown($('btn-resign'))) {
+      if (selfAt) resignSelf(now);
+      else selfAt = now;
+      return;
+    }
+    selfAt = 0;
     if (!cycle) {
       const quad = $('quad-result');
       if (over) {
@@ -1158,9 +1183,10 @@
         cycle = null;
       } else {
         const self = isSelfMatch();
-        if (self || now - cycle.since >= REMATCH_DELAY_MS) {
+        const leave = self || opponentGone();
+        if (leave || now - cycle.since >= REMATCH_DELAY_MS) {
           const rematch = $('btn-rematch');
-          if (!self && shown(rematch)) {
+          if (!leave && shown(rematch)) {
             rematch.click();
             cycle = { phase: 'rematch', since: now };
           } else {
@@ -1321,8 +1347,9 @@
   autoButton.style.cssText = buttonStyle;
   autoButton.title = 'Bekerja hanya bila Bot juga ON. Rematch otomatis saat permainan berakhir; bila '
     + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
-    + 'dijalankan. Lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan tombol ini kapan saja '
-    + 'untuk menghentikan siklus.';
+    + 'dijalankan. Lawan yang keluar atau menyerah: langsung ke menu tanpa rematch. Lawan ber-nickname sama '
+    + 'dengan akun ini: langsung Menyerah, tanpa rematch, lalu Quick match setelah jeda acak 5 sampai 10 '
+    + 'detik. Matikan tombol ini kapan saja untuk menghentikan siklus.';
   const autoLabel = () => {
     if (!autoRematch) return 'Ulang: OFF';
     if (!enabled) return 'Ulang: ON (Bot OFF)';
