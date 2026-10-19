@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '4.9';
+  const VERSION = '5.0';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -1324,15 +1324,15 @@
     + 'dijalankan. Lawan ber-nickname sama dengan akun ini tidak di-rematch. Matikan tombol ini kapan saja '
     + 'untuk menghentikan siklus.';
   const autoLabel = () => {
-    if (!autoRematch) return '↻ Ulang: OFF';
-    if (!enabled) return '↻ Ulang: ON (Bot OFF)';
-    if (!cycle) return '↻ Ulang: ON';
-    if (cycle.phase === 'wait') return '↻ Ulang: rematch...';
+    if (!autoRematch) return 'Ulang: OFF';
+    if (!enabled) return 'Ulang: ON (Bot OFF)';
+    if (!cycle) return 'Ulang: ON';
+    if (cycle.phase === 'wait') return 'Ulang: rematch...';
     if (cycle.phase === 'rematch') {
       const left = Math.max(0, Math.ceil((RESTART_TIMEOUT_MS - (Date.now() - cycle.since)) / 1000));
-      return '↻ Ulang: tunggu ' + left + ' dtk';
+      return 'Ulang: tunggu ' + left + ' dtk';
     }
-    return '↻ Ulang: Quick match...';
+    return 'Ulang: Quick match...';
   };
   const paintAuto = () => {
     const text = autoLabel();
