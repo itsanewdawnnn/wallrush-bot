@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '5.1';
+  const VERSION = '5.2';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -467,7 +467,8 @@
       const me = pos[p], op = pos[1 - p];
       const out = [];
       const b = blk[me];
-      for (let d = 0; d < 4; d++) {
+      for (let dd = 0; dd < 4; dd++) {
+        const d = p === 1 ? dd ^ 1 : dd;
         if ((b >> d) & 1) continue;
         const n1 = nbr[me * 4 + d];
         if (n1 < 0) continue;
@@ -478,7 +479,7 @@
         }
         const s0 = d < 2 ? 2 : 0;
         for (let k = 0; k < 2; k++) {
-          const pd = s0 + k;
+          const pd = s0 + (p === 1 ? 1 - k : k);
           if ((blk[n1] >> pd) & 1) continue;
           const n3 = nbr[n1 * 4 + pd];
           if (n3 >= 0) out.push(n3);
@@ -556,7 +557,8 @@
         const defBefore = left[q] > 0 ? bestNet(pm0, q) : 0;
         const found = [];
         for (let o = 0; o < 2; o++) {
-          for (let i = 0; i < S; i++) {
+          for (let ii = 0; ii < S; ii++) {
+            const i = p === 1 ? S - 1 - ii : ii;
             if (!slotFree(o, i)) continue;
             const a = wallCells(i);
             let lv = Infinity;
@@ -657,7 +659,8 @@
           };
           const cap = ply === 0 ? 24 : depth >= 4 ? 10 : depth === 3 ? 8 : 6;
           for (let o = 0; o < 2; o++) {
-            for (let i = 0; i < S; i++) {
+            for (let ii = 0; ii < S; ii++) {
+              const i = p === 1 ? S - 1 - ii : ii;
               if (!cand[o * S + i] || !slotFree(o, i)) continue;
               const a = wallCells(i);
               let e1a, e1b, e2a, e2b;
