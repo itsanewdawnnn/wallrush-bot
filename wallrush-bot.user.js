@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '5.2';
+  const VERSION = '5.3';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -10,6 +10,7 @@
   const RESTART_TIMEOUT_MS = 15000;
   const MENU_TIMEOUT_MS = 10000;
   const QUICK_RETRY_MS = 20000;
+  const SEARCH_TIMEOUT_MS = 60000;
   const FALLBACK_BUDGET_MS = 1500;
   const WORKER_FAILS = 3;
   const WORKER_GRACE_MS = 1500;
@@ -44,6 +45,7 @@
   let cycle = null;
   let autoRematch = false;
   let quickAt = 0;
+  let searchAt = 0;
   let holdUntil = 0;
   let selfAt = 0;
   let resignAt = 0;
@@ -1263,12 +1265,23 @@
     if (!autoRematch || !enabled) {
       cycle = null;
       quickAt = 0;
+      searchAt = 0;
       selfAt = 0;
       return;
     }
     const overlay = $('overlay-gameover');
     const over = Boolean(overlay && !overlay.hidden);
     const now = Date.now();
+    const cancelWait = $('btn-cancel-wait');
+    if (shown(cancelWait)) {
+      if (!searchAt) searchAt = now;
+      else if (now - searchAt >= SEARCH_TIMEOUT_MS) {
+        cancelWait.click();
+        searchAt = 0;
+      }
+    } else {
+      searchAt = 0;
+    }
     if (!over && isSelfMatch() && shown($('btn-resign'))) {
       if (selfAt) resignSelf(now);
       else selfAt = now;
@@ -1466,7 +1479,7 @@
   autoButton.style.cssText = buttonStyle;
   autoButton.title = 'Bekerja hanya bila Bot juga ON. Rematch otomatis saat permainan berakhir; bila '
     + '15 detik permainan tidak dimulai, kembali ke menu lalu Quick match. Dari menu, Quick match langsung '
-    + 'dijalankan. Lawan yang keluar atau menyerah: langsung ke menu tanpa rematch. Lawan ber-nickname sama '
+    + 'dijalankan. Bila 1 menit belum menemukan lawan, pencarian dibatalkan lalu Quick match dimulai lagi. Lawan yang keluar atau menyerah: langsung ke menu tanpa rematch. Lawan ber-nickname sama '
     + 'dengan akun ini: langsung Menyerah, tanpa rematch, lalu Quick match setelah jeda acak 5 sampai 10 '
     + 'detik. Matikan tombol ini kapan saja untuk menghentikan siklus.';
   const autoLabel = () => {
