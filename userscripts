@@ -8,7 +8,7 @@
 
  (async () => {
    const url =
-     'https://raw.githubusercontent.com/itsanewdawnnn/wallrush-bot/refs/heads/main/user.js';
+     'https://raw.githubusercontent.com/itsanewdawnnn/wallrush-bot/refs/heads/main/wallrush-bot.user.js';
 
    try {
      const response = await fetch(url + '?t=' + Date.now(), {
