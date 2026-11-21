@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = '5.3';
+  const VERSION = '5.4';
   const BUDGET_MS = 9000;
   const MIN_BUDGET_MS = 300;
   const BANK_MOVES = 14;
@@ -154,7 +154,10 @@
   let remoteVersion = '';
   let remoteState = readUrl() ? 'memuat' : 'lokal';
 
+  let mergedCache = null;
   const merged = () => {
+    const parts = [remote, memory.games, memory.lost, memory.won, memory.records];
+    if (mergedCache && mergedCache.parts.every((p, i) => p === parts[i])) return mergedCache.value;
     const sources = remote ? [remote, memory] : [memory];
     const games = new Map();
     const records = new Map();
@@ -163,12 +166,14 @@
       for (const r of s.records) records.set(r[0], r);
     }
     const won = new Set(sources.flatMap((s) => s.won));
-    return {
+    const value = {
       games: [...games],
       records: [...records.values()],
       lost: [...new Set(sources.flatMap((s) => s.lost))].filter((k) => !won.has(k)),
       won: [...won],
     };
+    mergedCache = { parts, value, sets: null };
+    return value;
   };
   const record = () => {
     const { games } = merged();
@@ -178,7 +183,8 @@
   const avoidList = () => merged().lost;
   const knowledge = () => {
     const all = merged();
-    return { avoid: all.lost, shield: all.won };
+    if (!mergedCache.sets) mergedCache.sets = { avoid: new Set(all.lost), shield: new Set(all.won) };
+    return mergedCache.sets;
   };
   const memoryLabel = () => {
     if (remoteState === 'lokal') return 'lokal';
@@ -911,8 +917,8 @@
     const chooseMove = (state, opts = {}) => {
       if (state.walls.length < prevWalls || opts.newGame) seen.clear();
       prevWalls = state.walls.length;
-      avoid = opts.avoid ? new Set(opts.avoid) : null;
-      shield = opts.shield ? new Set(opts.shield) : null;
+      avoid = opts.avoid instanceof Set ? opts.avoid : opts.avoid ? new Set(opts.avoid) : null;
+      shield = opts.shield instanceof Set ? opts.shield : opts.shield ? new Set(opts.shield) : null;
       prepare(state);
       load(state);
       seen.add(k1);
@@ -972,12 +978,14 @@
   }
 
   const WORKER_SRC = 'const engine=(' + engineMain.toString() + ')();let job=0;'
+    + 'let A=null,S=null;'
     + 'onmessage=(e)=>{const m=e.data,id=++job;'
     + 'if(m.stop)return;'
     + 'if(m.ponder){const t0=Date.now();const run=()=>{'
     + 'if(id!==job||Date.now()-t0>' + PONDER_MS + ')return;'
     + 'engine.ponder(m.state,{budgetMs:100});setTimeout(run,0);};run();return;}'
-    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,limitMs:m.limitMs,avoid:m.avoid,shield:m.shield}));};';
+    + 'if(m.avoid){A=m.avoid;S=m.shield;}'
+    + 'postMessage(engine.chooseMove(m.state,{budgetMs:m.budgetMs,limitMs:Math.max(100,m.until-Date.now()),avoid:A,shield:S}));};';
   let worker = null;
   let mainEngine = null;
   let pending = null;
@@ -1018,7 +1026,14 @@
         reject(new Error('waktu habis'));
       },
     };
-    w.postMessage({ state, budgetMs, limitMs, ...knowledge() });
+    const sets = knowledge();
+    const message = { state, budgetMs, until: Date.now() + limitMs };
+    if (w.known !== sets) {
+      message.avoid = sets.avoid;
+      message.shield = sets.shield;
+    }
+    w.postMessage(message);
+    w.known = sets;
   });
 
   const budgetNow = () => {
